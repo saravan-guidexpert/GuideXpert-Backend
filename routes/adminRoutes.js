@@ -21,6 +21,10 @@ const { getNatCampaignSubmissions } = require('../controllers/natCampaignControl
 const { getIitSecondFormSubmissions } = require('../controllers/iitSecondFormController');
 const { getTrainingAttendance } = require('../controllers/trainingController');
 const { getTrainingFeedback } = require('../controllers/feedbackController');
+const {
+  getCounsellorOccupations,
+  getCounsellorOccupationCategories,
+} = require('../controllers/counsellorOccupationsController');
 const { getTrainingFormResponses } = require('../controllers/trainingFormController');
 const { getProgressCheckInSubmissions } = require('../controllers/progressCheckInController');
 const { getIitainSessionFeedbackSubmissions } = require('../controllers/iitainSessionFeedbackController');
@@ -198,6 +202,8 @@ router.get('/nat-campaign-submissions', requireAdmin, getNatCampaignSubmissions)
 router.get('/iit-second-form-submissions', requireAdmin, getIitSecondFormSubmissions);
 router.get('/training-attendance', requireAdmin, getTrainingAttendance);
 router.get('/training-feedback', requireAdmin, getTrainingFeedback);
+router.get('/counsellor-occupations/categories', requireAdmin, getCounsellorOccupationCategories);
+router.get('/counsellor-occupations', requireAdmin, getCounsellorOccupations);
 router.get('/training-form-responses', requireAdmin, getTrainingFormResponses);
 router.get('/nurturing', requireAdmin, getProgressCheckInSubmissions);
 router.get('/iitain-session-feedback', requireAdmin, getIitainSessionFeedbackSubmissions);
