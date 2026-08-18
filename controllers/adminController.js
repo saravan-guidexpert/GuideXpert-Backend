@@ -1252,21 +1252,30 @@ exports.getAdminStats = async (req, res) => {
       assessment1Phones,
       assessment2Phones,
       assessment3Phones,
+      assessment4Phones,
+      assessment5Phones,
       activationFormMobilePhones,
       activationFormWhatsappPhones,
       counsellorPhones
     ] = await Promise.all([
-      FormSubmission.countDocuments(dateFilter),
+      // Count unique leads (no duplicate phone numbers) for the selected date range.
+      FormSubmission.distinct('phone', dateFilter).then((phones) => phones.length),
       FormSubmission.countDocuments({ $and: [dateFilter, { applicationStatus: 'in_progress' }] }),
       FormSubmission.countDocuments({ $and: [dateFilter, { applicationStatus: 'registered' }] }),
       FormSubmission.countDocuments({ $and: [dateFilter, { applicationStatus: 'completed' }] }),
-      FormSubmission.countDocuments({ $and: [dateFilter, { 'step2Data.otpVerified': true }] }),
-      FormSubmission.countDocuments({ $and: [dateFilter, SLOT_BOOKED_CONDITION] }),
-      FormSubmission.countDocuments({
+      // OTP Verified: distinct leads by phone for the selected date range.
+      FormSubmission.distinct('phone', { $and: [dateFilter, { 'step2Data.otpVerified': true }] }).then((phones) => phones.length),
+      // Slot Booked: distinct leads by phone *after* OTP verification.
+      // This matches the requirement: a person can book slot only if OTP got verified.
+      FormSubmission.distinct('phone', {
         $and: [dateFilter, { 'step2Data.otpVerified': true }, SLOT_BOOKED_CONDITION]
-      }),
+      }).then((phones) => phones.length),
+      // Kept for backward-compatible response shape; must equal Slot Booked under the "OTP -> Slot" rule.
+      FormSubmission.distinct('phone', {
+        $and: [dateFilter, { 'step2Data.otpVerified': true }, SLOT_BOOKED_CONDITION]
+      }).then((phones) => phones.length),
       FormSubmission.aggregate([
-        { $match: { $and: [dateFilter, SLOT_BOOKED_CONDITION] } },
+        { $match: { $and: [dateFilter, { 'step2Data.otpVerified': true }, SLOT_BOOKED_CONDITION] } },
         { $addFields: { _slotId: { $ifNull: ['$step3Data.selectedSlot', '$selectedSlot'] } } },
         { $match: { _slotId: { $exists: true, $nin: [null, ''] } } },
         { $group: { _id: '$_slotId', count: { $sum: 1 } } }
@@ -1277,12 +1286,18 @@ exports.getAdminStats = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
       MeetingAttendance.aggregate([{ $group: { _id: '$mobileNumber' } }]),
-      FormSubmission.find({ $and: [dateFilter, SLOT_BOOKED_CONDITION] }).select('phone').lean(),
+      // Slot booked leads: distinct phone source for the downstream attendance/assessment stages.
+      FormSubmission.find({ $and: [dateFilter, { 'step2Data.otpVerified': true }, SLOT_BOOKED_CONDITION] })
+        .select('phone')
+        .lean(),
       AssessmentSubmission.distinct('phone'),
       AssessmentSubmission2.distinct('phone'),
       AssessmentSubmission3.distinct('phone'),
-      TrainingFeedback.distinct('mobileNumber'),
-      TrainingFeedback.distinct('whatsappNumber'),
+      AssessmentSubmission4.distinct('phone'),
+      AssessmentSubmission5.distinct('phone'),
+      // Activation form should reflect actual deduped TrainingFeedback submissions.
+      TrainingFeedback.distinct('mobileNumber', dateFilter),
+      TrainingFeedback.distinct('whatsappNumber', dateFilter),
       Counsellor.distinct('phone')
     ]);
 
@@ -1300,7 +1315,9 @@ exports.getAdminStats = async (req, res) => {
       [
         ...(assessment1Phones || []),
         ...(assessment2Phones || []),
-        ...(assessment3Phones || [])
+        ...(assessment3Phones || []),
+        ...(assessment4Phones || []),
+        ...(assessment5Phones || [])
       ].map(normalizePhoneTo10).filter(Boolean)
     );
     const demoAttendedLeads = (slotBookedLeadsPhones || []).filter((lead) =>
@@ -1320,9 +1337,8 @@ exports.getAdminStats = async (req, res) => {
     const assessmentWrittenLeads = demoAttendedLeads.filter((lead) =>
       assessmentPhonesSet.has(normalizePhoneTo10(lead.phone))
     );
-    const activationFormCompleted = assessmentWrittenLeads.filter((lead) =>
-      activationFormPhonesSet.has(normalizePhoneTo10(lead.phone))
-    ).length;
+    // Use the actual deduped activation-form submissions count.
+    const activationFormCompleted = activationFormPhonesSet.size;
     const activationFormNotDone = Math.max(0, assessmentWritten - activationFormCompleted);
 
     const counsellorPhonesSet = new Set(
