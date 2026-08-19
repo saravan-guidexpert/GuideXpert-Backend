@@ -29,6 +29,20 @@ const FUNNEL_STATUS_KEYS = [
   'activation_filled',
 ];
 
+const FUNNEL_NODE_KEYS = [
+  'selected',
+  'form_submitted',
+  'form_not_submitted',
+  'otp_verified',
+  'otp_not_verified',
+  'slot_booked',
+  'slot_not_booked',
+  'demo_attended',
+  'demo_not_attended',
+  'activation_filled',
+  'activation_not_filled',
+];
+
 const FUNNEL_STATUS_LABEL = {
   form_submitted: 'Form submitted',
   otp_verified: 'OTP verified',
@@ -94,6 +108,11 @@ function parseFunnelStatus(value) {
   return FUNNEL_STATUS_KEYS.includes(key) ? key : '';
 }
 
+function parseFunnelNode(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return FUNNEL_NODE_KEYS.includes(key) ? key : '';
+}
+
 function furthestFunnelStatus(flags) {
   if (flags.activationFilled) return 'activation_filled';
   if (flags.assessmentWritten) return 'assessment_written';
@@ -106,13 +125,63 @@ function furthestFunnelStatus(flags) {
 
 function matchesFunnelStatus(flags, status) {
   if (!status) return true;
-  if (status === 'form_submitted') return flags.formSubmitted;
-  if (status === 'otp_verified') return flags.otpVerified;
-  if (status === 'slot_booked') return flags.slotBooked;
-  if (status === 'demo_attended') return flags.demoAttended;
-  if (status === 'assessment_written') return flags.assessmentWritten;
-  if (status === 'activation_filled') return flags.activationFilled;
+  const form = Boolean(flags.formSubmitted);
+  const otp = Boolean(flags.otpVerified);
+  const slot = Boolean(flags.slotBooked);
+  const demo = Boolean(flags.demoAttended);
+  const activation = Boolean(flags.activationFilled);
+  if (status === 'form_submitted') return form;
+  if (status === 'form_not_submitted') return !form;
+  if (status === 'otp_verified') return otp;
+  if (status === 'otp_not_verified') return form && !otp;
+  if (status === 'slot_booked') return slot;
+  if (status === 'slot_not_booked') return otp && !slot;
+  if (status === 'demo_attended') return demo;
+  if (status === 'demo_not_attended') return slot && !demo;
+  if (status === 'assessment_written') return Boolean(flags.assessmentWritten);
+  if (status === 'activation_filled') return activation;
+  if (status === 'activation_not_filled') return demo && !activation;
   return true;
+}
+
+function matchesFunnelNode(flags, node) {
+  if (!node || node === 'selected') return true;
+  if (node === 'activation_filled') {
+    return Boolean(flags.demoAttended) && Boolean(flags.activationFilled);
+  }
+  return matchesFunnelStatus(flags, node);
+}
+
+function buildFunnelTree(rows) {
+  let formSubmitted = 0;
+  let otpVerified = 0;
+  let slotBooked = 0;
+  let demoAttended = 0;
+  let activationFilled = 0;
+
+  for (const row of rows) {
+    const flags = row.funnel || {};
+    if (flags.formSubmitted) formSubmitted += 1;
+    if (flags.otpVerified) otpVerified += 1;
+    if (flags.slotBooked) slotBooked += 1;
+    if (flags.demoAttended) demoAttended += 1;
+    if (flags.demoAttended && flags.activationFilled) activationFilled += 1;
+  }
+
+  const selected = rows.length;
+  return {
+    selected,
+    form_submitted: formSubmitted,
+    form_not_submitted: Math.max(0, selected - formSubmitted),
+    otp_verified: otpVerified,
+    otp_not_verified: Math.max(0, formSubmitted - otpVerified),
+    slot_booked: slotBooked,
+    slot_not_booked: Math.max(0, otpVerified - slotBooked),
+    demo_attended: demoAttended,
+    demo_not_attended: Math.max(0, slotBooked - demoAttended),
+    activation_filled: activationFilled,
+    activation_not_filled: Math.max(0, demoAttended - activationFilled),
+  };
 }
 
 function upsertPerson(map, incoming) {
@@ -424,12 +493,19 @@ exports.getCounsellorOccupations = async (req, res) => {
       source: req.query.source,
       status: req.query.status,
     });
-    const stats = buildStats(filtered);
-    const total = filtered.length;
+    const stats = {
+      ...buildStats(filtered),
+      funnelTree: buildFunnelTree(filtered),
+    };
+    const funnelNode = parseFunnelNode(req.query.funnelNode);
+    const listed = funnelNode
+      ? filtered.filter((row) => matchesFunnelNode(row.funnel || {}, funnelNode))
+      : filtered;
+    const total = listed.length;
     const totalPages = Math.ceil(total / limit) || 1;
     const safePage = Math.min(page, totalPages);
     const skip = (safePage - 1) * limit;
-    const data = filtered.slice(skip, skip + limit);
+    const data = listed.slice(skip, skip + limit);
 
     return res.status(200).json({
       success: true,
