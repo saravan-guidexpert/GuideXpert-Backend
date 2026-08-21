@@ -20,7 +20,7 @@ const { getCollegeDostMeetAttendance } = require('../controllers/collegeDostMeet
 const { getNatCampaignSubmissions } = require('../controllers/natCampaignController');
 const { getIitSecondFormSubmissions } = require('../controllers/iitSecondFormController');
 const { getTrainingAttendance } = require('../controllers/trainingController');
-const { getTrainingFeedback } = require('../controllers/feedbackController');
+const { getTrainingFeedback, getCertifiedCounsellors2627 } = require('../controllers/feedbackController');
 const {
   getCounsellorOccupations,
   getCounsellorOccupationCategories,
@@ -202,6 +202,7 @@ router.get('/nat-campaign-submissions', requireAdmin, getNatCampaignSubmissions)
 router.get('/iit-second-form-submissions', requireAdmin, getIitSecondFormSubmissions);
 router.get('/training-attendance', requireAdmin, getTrainingAttendance);
 router.get('/training-feedback', requireAdmin, getTrainingFeedback);
+router.get('/certified-counsellors-26-27', requireAdmin, getCertifiedCounsellors2627);
 router.get('/counsellor-occupations/categories', requireAdmin, getCounsellorOccupationCategories);
 router.get('/counsellor-occupations', requireAdmin, getCounsellorOccupations);
 router.get('/training-form-responses', requireAdmin, getTrainingFormResponses);

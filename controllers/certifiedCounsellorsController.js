@@ -1,41 +1,69 @@
 const mongoose = require('mongoose');
 const Counsellor = require('../models/Counsellor');
 
+function getActivationLookupFrom(collection, as) {
+  return {
+    $lookup: {
+      from: collection,
+      let: { phone: '$phone' },
+      pipeline: [
+        {
+          $match: {
+            $expr: {
+              $or: [
+                { $eq: ['$mobileNumber', '$$phone'] },
+                { $eq: ['$whatsappNumber', '$$phone'] },
+              ],
+            },
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        { $limit: 1 },
+        {
+          $project: {
+            _id: 1,
+            name: 1,
+            email: 1,
+            anythingToConvey: 1,
+            createdAt: 1,
+          },
+        },
+      ],
+      as,
+    },
+  };
+}
+
 function getActivationLookupStages() {
   return [
+    getActivationLookupFrom('trainingfeedbacks', 'activationLegacy'),
+    getActivationLookupFrom('certified_counsellors_26_27', 'activation2627'),
     {
-      $lookup: {
-        from: 'trainingfeedbacks',
-        let: { phone: '$phone' },
-        pipeline: [
-          {
-            $match: {
-              $expr: {
-                $or: [
-                  { $eq: ['$mobileNumber', '$$phone'] },
-                  { $eq: ['$whatsappNumber', '$$phone'] },
-                ],
-              },
+      $addFields: {
+        activationProfile: {
+          $let: {
+            vars: {
+              legacy: { $arrayElemAt: ['$activationLegacy', 0] },
+              current: { $arrayElemAt: ['$activation2627', 0] },
+            },
+            in: {
+              $cond: [
+                {
+                  $gte: [
+                    { $ifNull: ['$$current.createdAt', new Date(0)] },
+                    { $ifNull: ['$$legacy.createdAt', new Date(0)] },
+                  ],
+                },
+                { $ifNull: ['$$current', '$$legacy'] },
+                { $ifNull: ['$$legacy', '$$current'] },
+              ],
             },
           },
-          { $sort: { createdAt: -1 } },
-          { $limit: 1 },
-          {
-            $project: {
-              _id: 1,
-              name: 1,
-              email: 1,
-              anythingToConvey: 1,
-              createdAt: 1,
-            },
-          },
-        ],
-        as: 'activationProfile',
+        },
       },
     },
     {
       $addFields: {
-        activationProfile: { $arrayElemAt: ['$activationProfile', 0] },
         displayName: {
           $ifNull: ['$activationProfile.name', '$name'],
         },

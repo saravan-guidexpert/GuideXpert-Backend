@@ -1,4 +1,5 @@
 const TrainingFeedback = require('../models/TrainingFeedback');
+const CertifiedCounsellor2627 = require('../models/CertifiedCounsellor2627');
 const { ADMIN_LIST_MAX_LIMIT } = require('../constants/listPagination');
 const otpRepository = require('../utils/otpRepository');
 
@@ -42,6 +43,16 @@ exports.submitTrainingFeedback = async (req, res) => {
     if (!occupation || occupation.length > 200) {
       return res.status(400).json({ success: false, message: 'Occupation is required.' });
     }
+    const occupationOptions = [
+      'Teachers',
+      'Working professionals',
+      'Graduation completed',
+      'Housewives (graduated)',
+      'Others',
+    ];
+    if (!occupationOptions.includes(occupation)) {
+      return res.status(400).json({ success: false, message: 'Select a valid occupation.' });
+    }
     const dob = dateOfBirth ? new Date(dateOfBirth) : null;
     if (!dob || Number.isNaN(dob.getTime())) {
       return res.status(400).json({ success: false, message: 'Valid date of birth is required.' });
@@ -67,7 +78,7 @@ exports.submitTrainingFeedback = async (req, res) => {
 
     // One submission per phone number (mobile or WhatsApp), across both stored fields
     const submittedPhones = [...new Set([mobileNumber, whatsappNumber])];
-    const existingFeedback = await TrainingFeedback.findOne({
+    const existingFeedback = await CertifiedCounsellor2627.findOne({
       $or: [
         { mobileNumber: { $in: submittedPhones } },
         { whatsappNumber: { $in: submittedPhones } },
@@ -95,7 +106,7 @@ exports.submitTrainingFeedback = async (req, res) => {
     };
     if (anythingToConvey) doc.anythingToConvey = anythingToConvey;
 
-    const record = await TrainingFeedback.create(doc);
+    const record = await CertifiedCounsellor2627.create(doc);
 
     return res.status(201).json({
       success: true,
@@ -168,106 +179,119 @@ function buildSearchQuery(q) {
   return { $or: clauses };
 }
 
+async function listActivationSubmissions(Model, req, res) {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(ADMIN_LIST_MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const skip = (page - 1) * limit;
+  const dateRange = buildDateRange(req.query.from, req.query.to);
+  const searchQuery = buildSearchQuery(req.query.q);
+  const gender = req.query.gender;
+  const occupation = req.query.occupation;
+
+  const match = {};
+  if (dateRange) match.createdAt = dateRange;
+  if (searchQuery) Object.assign(match, searchQuery);
+  if (gender === 'Male' || gender === 'Female') match.gender = gender;
+  if (occupation && String(occupation).trim()) {
+    match.occupation = { $regex: String(occupation).trim(), $options: 'i' };
+  }
+
+  const rawTotal = await Model.countDocuments(match);
+
+  const pipeline = [
+    { $match: match },
+    { $addFields: { normalizedMobile: '$mobileNumber' } },
+    { $sort: { createdAt: -1 } },
+    { $group: { _id: '$normalizedMobile', doc: { $first: '$$ROOT' } } },
+    { $replaceRoot: { newRoot: '$doc' } },
+    {
+      $facet: {
+        totalUnique: [{ $count: 'total' }],
+        genderStats: [{ $group: { _id: '$gender', count: { $sum: 1 } } }],
+        paginated: [
+          { $sort: { createdAt: -1 } },
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $project: {
+              id: '$_id',
+              name: 1,
+              mobileNumber: 1,
+              whatsappNumber: 1,
+              email: 1,
+              addressOfCommunication: 1,
+              occupation: 1,
+              dateOfBirth: 1,
+              gender: 1,
+              educationQualification: 1,
+              yearsOfExperience: 1,
+              anythingToConvey: 1,
+              createdAt: 1,
+              updatedAt: 1
+            }
+          }
+        ]
+      }
+    }
+  ];
+
+  const aggResult = await Model.aggregate(pipeline);
+  const first = Array.isArray(aggResult) && aggResult[0] ? aggResult[0] : {};
+  const uniqueCount = first?.totalUnique?.[0]?.total ?? 0;
+  const duplicateCount = Math.max(0, rawTotal - uniqueCount);
+  const genderStats = first?.genderStats ?? [];
+  const byGender = genderStats.reduce((acc, g) => {
+    if (g._id) acc[g._id] = g.count;
+    return acc;
+  }, {});
+  const rawPaginated = first?.paginated ?? [];
+  const data = rawPaginated.map((r) => ({
+    id: r.id || r._id,
+    name: r.name,
+    mobileNumber: r.mobileNumber,
+    whatsappNumber: r.whatsappNumber,
+    email: r.email,
+    addressOfCommunication: r.addressOfCommunication,
+    occupation: r.occupation,
+    dateOfBirth: r.dateOfBirth,
+    gender: r.gender,
+    educationQualification: r.educationQualification,
+    yearsOfExperience: r.yearsOfExperience,
+    anythingToConvey: r.anythingToConvey,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt
+  }));
+
+  const totalPages = Math.ceil(uniqueCount / limit) || 1;
+  const stats = {
+    totalSubmissions: rawTotal,
+    uniqueCount,
+    duplicateCount,
+    byGender
+  };
+
+  return res.status(200).json({
+    success: true,
+    data,
+    pagination: { page, limit, total: uniqueCount, totalPages },
+    stats
+  });
+}
+
 exports.getTrainingFeedback = async (req, res) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(ADMIN_LIST_MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || 50));
-    const skip = (page - 1) * limit;
-    const dateRange = buildDateRange(req.query.from, req.query.to);
-    const searchQuery = buildSearchQuery(req.query.q);
-    const gender = req.query.gender;
-    const occupation = req.query.occupation;
-
-    const match = {};
-    if (dateRange) match.createdAt = dateRange;
-    if (searchQuery) Object.assign(match, searchQuery);
-    if (gender === 'Male' || gender === 'Female') match.gender = gender;
-    if (occupation && String(occupation).trim()) {
-      match.occupation = { $regex: String(occupation).trim(), $options: 'i' };
-    }
-
-    const rawTotal = await TrainingFeedback.countDocuments(match);
-
-    const pipeline = [
-      { $match: match },
-      { $addFields: { normalizedMobile: '$mobileNumber' } },
-      { $sort: { createdAt: -1 } },
-      { $group: { _id: '$normalizedMobile', doc: { $first: '$$ROOT' } } },
-      { $replaceRoot: { newRoot: '$doc' } },
-      {
-        $facet: {
-          totalUnique: [{ $count: 'total' }],
-          genderStats: [{ $group: { _id: '$gender', count: { $sum: 1 } } }],
-          paginated: [
-            { $sort: { createdAt: -1 } },
-            { $skip: skip },
-            { $limit: limit },
-            {
-              $project: {
-                id: '$_id',
-                name: 1,
-                mobileNumber: 1,
-                whatsappNumber: 1,
-                email: 1,
-                addressOfCommunication: 1,
-                occupation: 1,
-                dateOfBirth: 1,
-                gender: 1,
-                educationQualification: 1,
-                yearsOfExperience: 1,
-                anythingToConvey: 1,
-                createdAt: 1,
-                updatedAt: 1
-              }
-            }
-          ]
-        }
-      }
-    ];
-
-    const aggResult = await TrainingFeedback.aggregate(pipeline);
-    const first = Array.isArray(aggResult) && aggResult[0] ? aggResult[0] : {};
-    const uniqueCount = first?.totalUnique?.[0]?.total ?? 0;
-    const duplicateCount = Math.max(0, rawTotal - uniqueCount);
-    const genderStats = first?.genderStats ?? [];
-    const byGender = genderStats.reduce((acc, g) => {
-      if (g._id) acc[g._id] = g.count;
-      return acc;
-    }, {});
-    const rawPaginated = first?.paginated ?? [];
-    const data = rawPaginated.map((r) => ({
-      id: r.id || r._id,
-      name: r.name,
-      mobileNumber: r.mobileNumber,
-      whatsappNumber: r.whatsappNumber,
-      email: r.email,
-      addressOfCommunication: r.addressOfCommunication,
-      occupation: r.occupation,
-      dateOfBirth: r.dateOfBirth,
-      gender: r.gender,
-      educationQualification: r.educationQualification,
-      yearsOfExperience: r.yearsOfExperience,
-      anythingToConvey: r.anythingToConvey,
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt
-    }));
-
-    const totalPages = Math.ceil(uniqueCount / limit) || 1;
-    const stats = {
-      totalSubmissions: rawTotal,
-      uniqueCount,
-      duplicateCount,
-      byGender
-    };
-
-    return res.status(200).json({
-      success: true,
-      data,
-      pagination: { page, limit, total: uniqueCount, totalPages },
-      stats
-    });
+    return await listActivationSubmissions(TrainingFeedback, req, res);
   } catch (err) {
     console.error('[getTrainingFeedback]', err);
+    return res.status(500).json({ success: false, message: 'Something went wrong.' });
+  }
+};
+
+exports.getCertifiedCounsellors2627 = async (req, res) => {
+  try {
+    return await listActivationSubmissions(CertifiedCounsellor2627, req, res);
+  } catch (err) {
+    console.error('[getCertifiedCounsellors2627]', err);
     return res.status(500).json({ success: false, message: 'Something went wrong.' });
   }
 };

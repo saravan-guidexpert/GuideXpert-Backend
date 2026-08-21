@@ -1,5 +1,6 @@
 const FormSubmission = require('../models/FormSubmission');
 const TrainingFeedback = require('../models/TrainingFeedback');
+const CertifiedCounsellor2627 = require('../models/CertifiedCounsellor2627');
 const MeetingAttendance = require('../models/MeetingAttendance');
 const AssessmentSubmission = require('../models/AssessmentSubmission');
 const AssessmentSubmission2 = require('../models/AssessmentSubmission2');
@@ -298,16 +299,19 @@ async function loadMergedPeople(createdAtRange, { includeFunnel = false } = {}) 
     'postRegistrationData.email': 1,
   };
 
+  const activationProjection = {
+    name: 1,
+    mobileNumber: 1,
+    whatsappNumber: 1,
+    occupation: 1,
+    email: 1,
+    createdAt: 1,
+  };
+
   const loads = [
     FormSubmission.find(match, applyProjection).lean(),
-    TrainingFeedback.find(match, {
-      name: 1,
-      mobileNumber: 1,
-      whatsappNumber: 1,
-      occupation: 1,
-      email: 1,
-      createdAt: 1,
-    }).lean(),
+    TrainingFeedback.find(match, activationProjection).lean(),
+    CertifiedCounsellor2627.find(match, activationProjection).lean(),
   ];
 
   if (includeFunnel) {
@@ -324,6 +328,7 @@ async function loadMergedPeople(createdAtRange, { includeFunnel = false } = {}) 
   const [
     applyDocs,
     activationDocs,
+    activation2627Docs,
     attendeeRaw,
     a1,
     a2,
@@ -361,7 +366,7 @@ async function loadMergedPeople(createdAtRange, { includeFunnel = false } = {}) 
     });
   }
 
-  for (const doc of activationDocs || []) {
+  for (const doc of [...(activationDocs || []), ...(activation2627Docs || [])]) {
     upsertPerson(map, {
       phone: normalizePhoneTo10(doc.mobileNumber || doc.whatsappNumber),
       name: doc.name ? String(doc.name).trim() : '',
