@@ -1,13 +1,13 @@
 const express = require('express');
 const requireCounsellor = require('../middleware/requireCounsellor');
-const WebinarProgress = require('../models/WebinarProgress');
+const WebinarProgress2627 = require('../models/WebinarProgress2627');
 
 const router = express.Router();
 
 /**
  * GET /api/counsellor/webinar-progress
- * Same WebinarProgress document shape as GET /api/admin/webinar-progress/:phone, but only for the
- * logged-in counsellor's phone (from Counsellor document). Matches admin panel row for that user.
+ * Same document shape as GET /api/admin/webinar-progress-26-27/:phone, but only for the
+ * logged-in counsellor's phone (from Counsellor document). Reads the current 26-27 cohort.
  */
 router.get('/webinar-progress', requireCounsellor, async (req, res) => {
   try {
@@ -20,7 +20,7 @@ router.get('/webinar-progress', requireCounsellor, async (req, res) => {
       });
     }
 
-    const doc = await WebinarProgress.findOne({ phone }).lean();
+    const doc = await WebinarProgress2627.findOne({ phone }).lean();
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
 
