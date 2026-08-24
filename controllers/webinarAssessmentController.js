@@ -62,6 +62,7 @@ async function submitWebinarAssessment(req, res) {
       answers: answersObj,
       submittedAt: new Date(),
       updatedAt: new Date(),
+      trainingYear: '26-27',
     };
 
     const created = await WebinarAssessmentSubmission.create(payload);
@@ -123,7 +124,7 @@ async function getWebinarAssessmentHistory(req, res) {
     const limit = parseHistoryLimit(req.query?.limit);
     let attempts = [];
     try {
-      attempts = await WebinarAssessmentSubmission.find({ assessmentId, phone })
+      attempts = await WebinarAssessmentSubmission.find({ assessmentId, phone, trainingYear: '26-27' })
         .sort({ submittedAt: -1, createdAt: -1 })
         .limit(limit)
         .select({ _id: 1, score: 1, total: 1, submittedAt: 1, createdAt: 1, updatedAt: 1 })

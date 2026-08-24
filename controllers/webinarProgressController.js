@@ -1,7 +1,26 @@
 const { ADMIN_LIST_MAX_LIMIT } = require('../constants/listPagination');
 const WebinarProgress = require('../models/WebinarProgress');
+const WebinarProgress2627 = require('../models/WebinarProgress2627');
 const WebinarAssessmentSubmission = require('../models/WebinarAssessmentSubmission');
 const { getWebinarUserFromToken, webinarAuthErrorResponse } = require('../utils/webinarJwtAuth');
+
+function progressModel(req) {
+  return req.webinarProgressModel || WebinarProgress;
+}
+
+function assessmentTrainingYearMatch(req) {
+  const cohort = req.webinarAssessmentCohort === '26-27' ? '26-27' : '25-26';
+  if (cohort === '26-27') return { trainingYear: '26-27' };
+  return { $or: [{ trainingYear: { $exists: false } }, { trainingYear: '25-26' }] };
+}
+
+function bindWebinarProgressCohort(ProgressModel, assessmentCohort) {
+  return (req, _res, next) => {
+    req.webinarProgressModel = ProgressModel;
+    req.webinarAssessmentCohort = assessmentCohort;
+    next();
+  };
+}
 
 const STATUS_RANK = { locked: 0, unlocked: 1, in_progress: 2, completed: 3 };
 const ALL_MODULE_IDS = ['intro', 's2', 'a1', 's3', 'a2', 's4', 'a3', 's5', 'a4', 's6', 'a5'];
@@ -172,9 +191,10 @@ function parseSortParam(sortStr) {
 /**
  * Applies complete_all or reset bulk action. Shared by PATCH single-user and POST bulk.
  */
-async function applyBulkProgressToPhone(phone, bulkAction) {
+async function applyBulkProgressToPhone(phone, bulkAction, ProgressModel) {
+  const Model = ProgressModel || WebinarProgress;
   const now = new Date();
-  const existing = await WebinarProgress.findOne({ phone }).lean();
+  const existing = await Model.findOne({ phone }).lean();
   const completed = new Set(existing?.completedModules || []);
   const $set = { lastActivityAt: now };
 
@@ -206,7 +226,7 @@ async function applyBulkProgressToPhone(phone, bulkAction) {
   $set.completedModules = completedArr;
   $set.overallPercent = Math.round((completedArr.length / ALL_MODULE_IDS.length) * 100);
 
-  const updated = await WebinarProgress.findOneAndUpdate(
+  const updated = await Model.findOneAndUpdate(
     { phone },
     { $set },
     { new: true, upsert: true, setDefaultsOnInsert: true }
@@ -465,7 +485,7 @@ async function syncProgress(req, res) {
       });
     }
 
-    const updated = await WebinarProgress.findOneAndUpdate(
+    const updated = await WebinarProgress2627.findOneAndUpdate(
       { phone: user.phone },
       pipeline,
       { upsert: true, new: true, updatePipeline: true }
@@ -488,7 +508,7 @@ async function getProgress(req, res) {
       return res.status(status).json(body);
     }
 
-    const doc = await WebinarProgress.findOne({ phone: user.phone }).lean();
+    const doc = await WebinarProgress2627.findOne({ phone: user.phone }).lean();
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     if (!doc) {
@@ -511,7 +531,7 @@ async function recordCertificateDownload(req, res) {
       return res.status(status).json(body);
     }
 
-    await WebinarProgress.findOneAndUpdate(
+    await WebinarProgress2627.findOneAndUpdate(
       { phone: user.phone },
       { $set: { certificateDownloadedAt: new Date() } },
       { new: true, upsert: true }
@@ -547,15 +567,16 @@ async function adminListProgress(req, res) {
     const match = buildWebinarAdminMatch(req.query);
     const sortSpec = parseSortParam(sort);
 
+    const Model = progressModel(req);
     const [users, total] = await Promise.all([
-      WebinarProgress.aggregate([
+      Model.aggregate([
         { $match: match },
         { $sort: sortSpec },
         { $skip: skip },
         { $limit: limit },
         { $project: { ...LIST_PROJECTION, modulesDone: { $size: { $ifNull: ['$completedModules', []] } } } },
       ]),
-      WebinarProgress.countDocuments(match),
+      Model.countDocuments(match),
     ]);
 
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -570,26 +591,28 @@ async function adminListProgress(req, res) {
 // GET /api/admin/webinar-progress/stats
 async function adminProgressStats(req, res) {
   try {
+    const Model = progressModel(req);
+    const yearMatch = assessmentTrainingYearMatch(req);
     const assessmentIds = ['a1', 'a2', 'a3', 'a4', 'a5'];
 
     const [totalResult, completedResult, avgResult, activeResult, perModuleResult, highScorerResult, assessmentAggResult] = await Promise.all([
-      WebinarProgress.countDocuments(),
-      WebinarProgress.countDocuments({ overallPercent: 100 }),
-      WebinarProgress.aggregate([{ $group: { _id: null, avg: { $avg: '$overallPercent' } } }]),
-      WebinarProgress.countDocuments({ lastActivityAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
-      WebinarProgress.aggregate([
+      Model.countDocuments(),
+      Model.countDocuments({ overallPercent: 100 }),
+      Model.aggregate([{ $group: { _id: null, avg: { $avg: '$overallPercent' } } }]),
+      Model.countDocuments({ lastActivityAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
+      Model.aggregate([
         { $unwind: '$completedModules' },
         { $group: { _id: '$completedModules', count: { $sum: 1 } } },
       ]),
       WebinarAssessmentSubmission.aggregate([
-        { $match: { assessmentId: { $in: assessmentIds } } },
+        { $match: { ...yearMatch, assessmentId: { $in: assessmentIds } } },
         { $addFields: { pct: { $cond: [{ $gt: ['$total', 0] }, { $divide: ['$score', '$total'] }, 0] } } },
         { $match: { pct: { $gte: 0.8 } } },
         { $group: { _id: { assessmentId: '$assessmentId', phone: '$phone' } } },
         { $group: { _id: '$_id.assessmentId', count: { $sum: 1 } } },
       ]),
       WebinarAssessmentSubmission.aggregate([
-        { $match: { assessmentId: { $in: assessmentIds }, total: { $gt: 0 } } },
+        { $match: { ...yearMatch, assessmentId: { $in: assessmentIds }, total: { $gt: 0 } } },
         { $addFields: { pct: { $divide: ['$score', '$total'] } } },
         {
           $group: {
@@ -668,7 +691,7 @@ async function adminProgressDetail(req, res) {
       return res.status(400).json({ success: false, message: 'Invalid phone number.' });
     }
 
-    const doc = await WebinarProgress.findOne({ phone }).lean();
+    const doc = await progressModel(req).findOne({ phone }).lean();
     if (!doc) {
       return res.status(404).json({ success: false, message: 'No progress found for this user.' });
     }
@@ -690,7 +713,10 @@ async function adminAssessmentDetail(req, res) {
       return res.status(400).json({ success: false, message: 'Invalid phone number.' });
     }
 
-    const submissions = await WebinarAssessmentSubmission.find({ phone })
+    const submissions = await WebinarAssessmentSubmission.find({
+      phone,
+      ...assessmentTrainingYearMatch(req),
+    })
       .sort({ submittedAt: -1 })
       .lean();
 
@@ -748,11 +774,12 @@ async function adminBulkProgress(req, res) {
       return res.status(400).json({ success: false, message: 'Maximum 100 phones per request.' });
     }
 
+    const Model = progressModel(req);
     const results = [];
     for (const raw of phones) {
       const phone = String(raw || '').replace(/\D/g, '').slice(-10);
       if (!/^\d{10}$/.test(phone)) continue;
-      const out = await applyBulkProgressToPhone(phone, action);
+      const out = await applyBulkProgressToPhone(phone, action, Model);
       if (out.error) {
         return res.status(400).json({ success: false, message: out.error });
       }
@@ -777,9 +804,10 @@ async function adminUpdateProgress(req, res) {
 
     const { moduleUpdates, bulkAction } = req.body || {};
     const now = new Date();
+    const Model = progressModel(req);
 
     if (bulkAction === 'complete_all' || bulkAction === 'reset') {
-      const out = await applyBulkProgressToPhone(phone, bulkAction);
+      const out = await applyBulkProgressToPhone(phone, bulkAction, Model);
       if (out.error) {
         return res.status(400).json({ success: false, message: out.error });
       }
@@ -787,7 +815,7 @@ async function adminUpdateProgress(req, res) {
       return res.status(200).json({ success: true, data: out.data });
     }
 
-    const existing = await WebinarProgress.findOne({ phone }).lean();
+    const existing = await Model.findOne({ phone }).lean();
     const completed = new Set(existing?.completedModules || []);
     const $set = { lastActivityAt: now };
 
@@ -817,7 +845,7 @@ async function adminUpdateProgress(req, res) {
     $set.completedModules = completedArr;
     $set.overallPercent = Math.round((completedArr.length / ALL_MODULE_IDS.length) * 100);
 
-    const updated = await WebinarProgress.findOneAndUpdate(
+    const updated = await Model.findOneAndUpdate(
       { phone },
       { $set },
       { new: true, upsert: true, setDefaultsOnInsert: true }
@@ -846,7 +874,7 @@ async function adminProgressExport(req, res) {
       { $limit: EXPORT_MAX_ROWS + 1 },
     ];
 
-    const docs = await WebinarProgress.aggregate(pipeline);
+    const docs = await progressModel(req).aggregate(pipeline);
     if (docs.length > EXPORT_MAX_ROWS) {
       return res.status(413).json({
         success: false,
@@ -870,7 +898,8 @@ async function adminProgressExport(req, res) {
     });
 
     const csv = header + rows.join('\n');
-    const filename = `webinar-progress-${new Date().toISOString().slice(0, 10)}.csv`;
+    const cohort = req.webinarAssessmentCohort === '26-27' ? '26-27' : '25-26';
+    const filename = `training-progress-${cohort}-${new Date().toISOString().slice(0, 10)}.csv`;
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -882,6 +911,7 @@ async function adminProgressExport(req, res) {
 }
 
 module.exports = {
+  bindWebinarProgressCohort,
   syncProgress,
   getProgress,
   recordCertificateDownload,

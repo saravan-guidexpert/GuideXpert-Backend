@@ -15,6 +15,7 @@ const IitSlotConfig = require('../models/IitSlotConfig');
 const IitSlotDateOverride = require('../models/IitSlotDateOverride');
 const MeetingAttendance = require('../models/MeetingAttendance');
 const TrainingFeedback = require('../models/TrainingFeedback');
+const CertifiedCounsellor2627 = require('../models/CertifiedCounsellor2627');
 const TrainingFormSubmission = require('../models/TrainingFormSubmission');
 const TrainingFormResponse = require('../models/TrainingFormResponse');
 const Counsellor = require('../models/Counsellor');
@@ -74,13 +75,15 @@ async function getAssessmentPhones10() {
   return [...new Set([...(a1 || []), ...(a2 || []), ...(a3 || [])].map(normalizePhoneTo10).filter(Boolean))];
 }
 
-/** Union of TrainingFeedback mobile + whatsapp (aligns with getAdminStats activation form completed). */
+/** Union of TrainingFeedback + CertifiedCounsellor2627 mobile + whatsapp. */
 async function getActivationPhones10() {
-  const [m, w] = await Promise.all([
+  const [m, w, m27, w27] = await Promise.all([
     TrainingFeedback.distinct('mobileNumber'),
     TrainingFeedback.distinct('whatsappNumber'),
+    CertifiedCounsellor2627.distinct('mobileNumber'),
+    CertifiedCounsellor2627.distinct('whatsappNumber'),
   ]);
-  return [...new Set([...(m || []), ...(w || [])].map(normalizePhoneTo10).filter(Boolean))];
+  return [...new Set([...(m || []), ...(w || []), ...(m27 || []), ...(w27 || [])].map(normalizePhoneTo10).filter(Boolean))];
 }
 
 /** Union of phones that submitted training form (live + legacy collection). */
@@ -1256,6 +1259,8 @@ exports.getAdminStats = async (req, res) => {
       assessment5Phones,
       activationFormMobilePhones,
       activationFormWhatsappPhones,
+      activationForm2627MobilePhones,
+      activationForm2627WhatsappPhones,
       counsellorPhones
     ] = await Promise.all([
       // Count unique leads (no duplicate phone numbers) for the selected date range.
@@ -1298,6 +1303,8 @@ exports.getAdminStats = async (req, res) => {
       // Activation form should reflect actual deduped TrainingFeedback submissions.
       TrainingFeedback.distinct('mobileNumber', dateFilter),
       TrainingFeedback.distinct('whatsappNumber', dateFilter),
+      CertifiedCounsellor2627.distinct('mobileNumber', dateFilter),
+      CertifiedCounsellor2627.distinct('whatsappNumber', dateFilter),
       Counsellor.distinct('phone')
     ]);
 
@@ -1331,7 +1338,9 @@ exports.getAdminStats = async (req, res) => {
     const activationFormPhonesSet = new Set(
       [
         ...(activationFormMobilePhones || []),
-        ...(activationFormWhatsappPhones || [])
+        ...(activationFormWhatsappPhones || []),
+        ...(activationForm2627MobilePhones || []),
+        ...(activationForm2627WhatsappPhones || []),
       ].map(normalizePhoneTo10).filter(Boolean)
     );
     const assessmentWrittenLeads = demoAttendedLeads.filter((lead) =>

@@ -53,10 +53,16 @@ const webinarAssessmentSubmissionSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  trainingYear: {
+    type: String,
+    enum: ['25-26', '26-27'],
+    default: undefined,
+  },
 }, { timestamps: true });
 
 webinarAssessmentSubmissionSchema.index({ assessmentId: 1, phone: 1 });
 webinarAssessmentSubmissionSchema.index({ submittedAt: -1 });
+webinarAssessmentSubmissionSchema.index({ trainingYear: 1, assessmentId: 1 });
 
 const WebinarAssessmentSubmission = mongoose.model(
   'WebinarAssessmentSubmission',

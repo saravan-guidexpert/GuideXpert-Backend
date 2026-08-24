@@ -20,7 +20,7 @@ const { getCollegeDostMeetAttendance } = require('../controllers/collegeDostMeet
 const { getNatCampaignSubmissions } = require('../controllers/natCampaignController');
 const { getIitSecondFormSubmissions } = require('../controllers/iitSecondFormController');
 const { getTrainingAttendance } = require('../controllers/trainingController');
-const { getTrainingFeedback } = require('../controllers/feedbackController');
+const { getTrainingFeedback, getCertifiedCounsellors2627 } = require('../controllers/feedbackController');
 const {
   getCounsellorOccupations,
   getCounsellorOccupationCategories,
@@ -95,7 +95,18 @@ const requireAdmin = require('../middleware/requireAdmin');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 const requireOsviAdminToken = require('../middleware/requireOsviAdminToken');
 const { listAdmins, createAdmin, updateAdmin, deleteAdmin, resetAdminPassword, changeMyPassword } = require('../controllers/adminUserController');
-const { adminListProgress, adminProgressStats, adminProgressDetail, adminAssessmentDetail, adminUpdateProgress, adminBulkProgress, adminProgressExport } = require('../controllers/webinarProgressController');
+const {
+  bindWebinarProgressCohort,
+  adminListProgress,
+  adminProgressStats,
+  adminProgressDetail,
+  adminAssessmentDetail,
+  adminUpdateProgress,
+  adminBulkProgress,
+  adminProgressExport,
+} = require('../controllers/webinarProgressController');
+const WebinarProgress = require('../models/WebinarProgress');
+const WebinarProgress2627 = require('../models/WebinarProgress2627');
 const {
   listPosters,
   getPoster,
@@ -202,6 +213,7 @@ router.get('/nat-campaign-submissions', requireAdmin, getNatCampaignSubmissions)
 router.get('/iit-second-form-submissions', requireAdmin, getIitSecondFormSubmissions);
 router.get('/training-attendance', requireAdmin, getTrainingAttendance);
 router.get('/training-feedback', requireAdmin, getTrainingFeedback);
+router.get('/certified-counsellors-26-27', requireAdmin, getCertifiedCounsellors2627);
 router.get('/counsellor-occupations/categories', requireAdmin, getCounsellorOccupationCategories);
 router.get('/counsellor-occupations', requireAdmin, getCounsellorOccupations);
 router.get('/training-form-responses', requireAdmin, getTrainingFormResponses);
@@ -662,13 +674,18 @@ router.post('/certificates/bulk-download', requireAdmin, (req, res, next) => {
   return bulkDownloadCertificates(req, res, next);
 });
 
-// Webinar Progress
-router.get('/webinar-progress/stats', requireAdmin, adminProgressStats);
-router.get('/webinar-progress/export', requireAdmin, adminProgressExport);
-router.post('/webinar-progress/bulk', requireAdmin, adminBulkProgress);
-router.patch('/webinar-progress/:phone', requireAdmin, adminUpdateProgress);
-router.get('/webinar-progress/:phone/assessments', requireAdmin, adminAssessmentDetail);
-router.get('/webinar-progress/:phone', requireAdmin, adminProgressDetail);
-router.get('/webinar-progress', requireAdmin, adminListProgress);
+// Training progress 25-26 (frozen) and 26-27 (live)
+function mountWebinarProgressAdmin(prefix, ...middleware) {
+  router.get(`${prefix}/stats`, requireAdmin, ...middleware, adminProgressStats);
+  router.get(`${prefix}/export`, requireAdmin, ...middleware, adminProgressExport);
+  router.post(`${prefix}/bulk`, requireAdmin, ...middleware, adminBulkProgress);
+  router.patch(`${prefix}/:phone`, requireAdmin, ...middleware, adminUpdateProgress);
+  router.get(`${prefix}/:phone/assessments`, requireAdmin, ...middleware, adminAssessmentDetail);
+  router.get(`${prefix}/:phone`, requireAdmin, ...middleware, adminProgressDetail);
+  router.get(prefix, requireAdmin, ...middleware, adminListProgress);
+}
+
+mountWebinarProgressAdmin('/webinar-progress', bindWebinarProgressCohort(WebinarProgress, '25-26'));
+mountWebinarProgressAdmin('/webinar-progress-26-27', bindWebinarProgressCohort(WebinarProgress2627, '26-27'));
 
 module.exports = router;
