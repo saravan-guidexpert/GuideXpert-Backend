@@ -21,6 +21,7 @@ const leadInsightsRoutes = require('./routes/leadInsightsRoutes');
 const analyticsExecutiveRoutes = require('./routes/analyticsExecutiveRoutes');
 const influencerRoutes = require('./routes/influencerRoutes');
 const meetingRoutes = require('./routes/meetingRoutes');
+const activationCounsellorMeetRoutes = require('./routes/activationCounsellorMeetRoutes');
 const iitMeetRoutes = require('./routes/iitMeetRoutes');
 const iitMeetHindiRoutes = require('./routes/iitMeetHindiRoutes');
 const iitFirstFormRoutes = require('./routes/iitFirstFormRoutes');
@@ -265,6 +266,7 @@ app.get('/api/student-testimonials', require('./controllers/studentTestimonialCo
 app.use('/api/bda', require('./routes/bdaRoutes'));
 app.use('/api/bda/whatsapp-chat', whatsappChatBdaRoutes);
 app.use('/api/meeting', meetingRoutes);
+app.use('/api/activation-counsellor-meet', activationCounsellorMeetRoutes);
 app.use('/api/iit-meet', iitMeetRoutes);
 app.use('/api/iit-meet-hindi', iitMeetHindiRoutes);
 app.use('/api/iit-first-form', iitFirstFormRoutes);

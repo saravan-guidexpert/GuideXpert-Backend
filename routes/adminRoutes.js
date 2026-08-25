@@ -12,6 +12,7 @@ const {
   deleteSalesAnalyticsSavedUtmLink,
 } = require('../controllers/salesAnalyticsSavedUtmController');
 const { getMeetingAttendance } = require('../controllers/meetingController');
+const { getActivationCounsellorMeetAttendance } = require('../controllers/activationCounsellorMeetController');
 const { getDemoMeetSchedule, putDemoMeetSchedule } = require('../controllers/demoMeetScheduleController');
 const { getIitMeetAttendance, getIitMeetHindiAttendance } = require('../controllers/iitMeetController');
 const { getIitFirstFormSubmissions } = require('../controllers/iitFirstFormController');
@@ -204,6 +205,7 @@ router.put('/iit-slots/overrides', requireAdmin, setIitSlotOverride);
 router.get('/demo-meet-schedule', requireAdmin, getDemoMeetSchedule);
 router.put('/demo-meet-schedule', requireAdmin, putDemoMeetSchedule);
 router.get('/meeting-attendance', requireAdmin, getMeetingAttendance);
+router.get('/activation-counsellor-meet-attendance', requireAdmin, getActivationCounsellorMeetAttendance);
 router.get('/iit-meet-attendance', requireAdmin, getIitMeetAttendance);
 router.get('/iit-meet-hindi-attendance', requireAdmin, getIitMeetHindiAttendance);
 router.get('/iit-first-form-submissions', requireAdmin, getIitFirstFormSubmissions);
