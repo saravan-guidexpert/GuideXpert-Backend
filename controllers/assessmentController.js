@@ -8,6 +8,7 @@ const AssessmentSubmission4 = require('../models/AssessmentSubmission4');
 const AssessmentSubmission5 = require('../models/AssessmentSubmission5');
 const VerifiedPhoneSession = require('../models/VerifiedPhoneSession');
 const TrainingFeedback = require('../models/TrainingFeedback');
+const CertifiedCounsellor2627 = require('../models/CertifiedCounsellor2627');
 
 const VERIFIED_TTL_MS = 15 * 60 * 1000; // 15 min
 
@@ -399,7 +400,11 @@ exports.checkActivationEligibility = async (req, res) => {
     if (!/^\d{10}$/.test(p)) {
       return res.status(400).json({ success: false, message: 'Valid 10-digit phone required' });
     }
-    const exists = isPrivilegedPhone(p) || !!(await TrainingFeedback.exists({ mobileNumber: p }));
+    const phoneMatch = { $or: [{ mobileNumber: p }, { whatsappNumber: p }] };
+    const exists =
+      isPrivilegedPhone(p) ||
+      !!(await CertifiedCounsellor2627.exists(phoneMatch)) ||
+      !!(await TrainingFeedback.exists(phoneMatch));
     return res.status(200).json({ success: true, eligible: exists, data: { exists, phone: p } });
   } catch (err) {
     console.error('[checkActivationEligibility]', err.message);

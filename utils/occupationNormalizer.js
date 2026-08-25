@@ -114,6 +114,10 @@ const CANONICAL_CATEGORIES = {
 
   housewife: 'Housewife',
   'house wife': 'Housewife',
+  housewives: 'Housewife',
+  'house wives': 'Housewife',
+  'housewives (graduated)': 'Housewife',
+  'house wife (graduated)': 'Housewife',
   houswife: 'Housewife',
   housewifee: 'Housewife',
   hw: 'Housewife',

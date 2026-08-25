@@ -47,10 +47,20 @@ exports.submitTrainingFeedback = async (req, res) => {
       'Teachers',
       'Working professionals',
       'Graduation completed',
+      'House wife (graduated)',
       'Housewives (graduated)',
       'Others',
     ];
-    if (!occupationOptions.includes(occupation)) {
+    const occupationCanonical = {
+      'housewives (graduated)': 'House wife (graduated)',
+      'house wife (graduated)': 'House wife (graduated)',
+      'housewife (graduated)': 'House wife (graduated)',
+    };
+    const occupationKey = occupation.toLowerCase();
+    const occupationMatched =
+      occupationOptions.find((opt) => opt.toLowerCase() === occupationKey) ||
+      occupationCanonical[occupationKey];
+    if (!occupationMatched) {
       return res.status(400).json({ success: false, message: 'Select a valid occupation.' });
     }
     const dob = dateOfBirth ? new Date(dateOfBirth) : null;
@@ -98,7 +108,7 @@ exports.submitTrainingFeedback = async (req, res) => {
       whatsappNumber,
       email,
       addressOfCommunication,
-      occupation,
+      occupation: occupationCanonical[occupationKey] || occupationMatched,
       dateOfBirth: dob,
       gender,
       educationQualification,
