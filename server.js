@@ -22,6 +22,7 @@ const analyticsExecutiveRoutes = require('./routes/analyticsExecutiveRoutes');
 const influencerRoutes = require('./routes/influencerRoutes');
 const meetingRoutes = require('./routes/meetingRoutes');
 const activationCounsellorMeetRoutes = require('./routes/activationCounsellorMeetRoutes');
+const proFormRoutes = require('./routes/proFormRoutes');
 const iitMeetRoutes = require('./routes/iitMeetRoutes');
 const iitMeetHindiRoutes = require('./routes/iitMeetHindiRoutes');
 const iitFirstFormRoutes = require('./routes/iitFirstFormRoutes');
@@ -267,6 +268,7 @@ app.use('/api/bda', require('./routes/bdaRoutes'));
 app.use('/api/bda/whatsapp-chat', whatsappChatBdaRoutes);
 app.use('/api/meeting', meetingRoutes);
 app.use('/api/activation-counsellor-meet', activationCounsellorMeetRoutes);
+app.use('/api/pro-form', proFormRoutes);
 app.use('/api/iit-meet', iitMeetRoutes);
 app.use('/api/iit-meet-hindi', iitMeetHindiRoutes);
 app.use('/api/iit-first-form', iitFirstFormRoutes);
@@ -299,67 +301,129 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message });
 });
 
-const PORT = process.env.PORT || 5000;
+const PORT = Number(process.env.PORT) || 5000;
+
+function listenOnPort(port) {
+  return new Promise((resolve, reject) => {
+    const server = app.listen({ port, host: '0.0.0.0' }, () => resolve({ server, port }));
+    server.once('error', (err) => {
+      server.close(() => reject(err));
+    });
+  });
+}
+
+function isGuideXpertHealthBody(text) {
+  try {
+    const data = JSON.parse(text);
+    return Boolean(data && (data.status === 'ok' || data.status === 'error' || data.message));
+  } catch {
+    return false;
+  }
+}
+
+async function portServesGuideXpert(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/pro-form/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    const text = await response.text();
+    return isGuideXpertHealthBody(text);
+  } catch {
+    return false;
+  }
+}
+
+async function bindAvailablePort(preferredPort) {
+  const candidates = [preferredPort, preferredPort + 1, preferredPort + 2];
+  for (const port of candidates) {
+    let server;
+    try {
+      ({ server } = await listenOnPort(port));
+    } catch (err) {
+      if (err && err.code === 'EADDRINUSE') {
+        console.warn(`[server] Port ${port} is already in use. Trying the next port.`);
+        continue;
+      }
+      throw err;
+    }
+
+    const ours = await portServesGuideXpert(port);
+    if (ours) {
+      if (port !== preferredPort) {
+        console.warn(`[server] Bound to ${port} because ${preferredPort} is used by another app.`);
+        console.warn(`[server] Point Vite at this port: VITE_PROXY_TARGET=http://127.0.0.1:${port}`);
+      }
+      return { server, port };
+    }
+
+    console.warn(`[server] Port ${port} accepted a listen but is not GuideXpert. Closing and trying the next port.`);
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  throw new Error(`Could not bind GuideXpert on ports ${candidates.join(', ')}`);
+}
+
+function attachDevCronLoops(boundPort) {
+  if (String(process.env.DEV_IIT_CRON_LOOP || '').trim() === '1') {
+    const secret = process.env.CRON_SECRET || process.env.GUIDEXPERT_CRON_SECRET;
+    const cronBase = `http://127.0.0.1:${boundPort}`;
+    const tickMs = Math.max(30_000, parseInt(process.env.DEV_IIT_CRON_INTERVAL_MS || '60000', 10) || 60_000);
+    console.log(`[dev] IIT reminder cron loop every ${tickMs}ms → ${cronBase}/api/cron/send-iit-reminders`);
+    setInterval(() => {
+      if (!secret) return;
+      fetch(`${cronBase}/api/cron/send-iit-reminders?key=${encodeURIComponent(secret)}`).catch((err) => {
+        console.warn('[dev] IIT cron tick failed:', err.message);
+      });
+    }, tickMs);
+  }
+
+  if (String(process.env.DEV_GUIDANCE_REMINDER_CRON_LOOP || '').trim() === '1') {
+    const secret = process.env.CRON_SECRET || process.env.GUIDEXPERT_CRON_SECRET;
+    const cronBase = `http://127.0.0.1:${boundPort}`;
+    const tickMs = Math.max(
+      30_000,
+      parseInt(process.env.DEV_GUIDANCE_REMINDER_CRON_INTERVAL_MS || '60000', 10) || 60_000
+    );
+    console.log(
+      `[dev] Guidance reminder cron loop every ${tickMs}ms → ${cronBase}/api/cron/send-guidance-reminders`
+    );
+    setInterval(() => {
+      if (!secret) return;
+      fetch(`${cronBase}/api/cron/send-guidance-reminders?key=${encodeURIComponent(secret)}`).catch((err) => {
+        console.warn('[dev] Guidance reminder cron tick failed:', err.message);
+      });
+    }, tickMs);
+  }
+
+  if (String(process.env.DEV_IIT_TELUGU_SMS_CRON_LOOP || '').trim() === '1') {
+    const secret = process.env.CRON_SECRET || process.env.GUIDEXPERT_CRON_SECRET;
+    const cronBase = `http://127.0.0.1:${boundPort}`;
+    const tickMs = Math.max(
+      30_000,
+      parseInt(process.env.DEV_IIT_TELUGU_SMS_CRON_INTERVAL_MS || '60000', 10) || 60_000
+    );
+    console.log(
+      `[dev] IIT Telugu SMS cron loop every ${tickMs}ms → ${cronBase}/api/cron/send-iit-telugu-sms`
+    );
+    setInterval(() => {
+      if (!secret) return;
+      fetch(`${cronBase}/api/cron/send-iit-telugu-sms?key=${encodeURIComponent(secret)}`).catch(
+        (err) => {
+          console.warn('[dev] IIT Telugu SMS cron tick failed:', err.message);
+        }
+      );
+    }, tickMs);
+  }
+}
 
 // Start server only after MongoDB connection is established (local dev only)
 const startServer = async () => {
   try {
     await connectDB();
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-      console.log(`MongoDB connection established. Server ready to accept requests.`);
-
-      if (String(process.env.DEV_IIT_CRON_LOOP || '').trim() === '1') {
-        const secret = process.env.CRON_SECRET || process.env.GUIDEXPERT_CRON_SECRET;
-        const cronBase = `http://127.0.0.1:${PORT}`;
-        const tickMs = Math.max(30_000, parseInt(process.env.DEV_IIT_CRON_INTERVAL_MS || '60000', 10) || 60_000);
-        console.log(`[dev] IIT reminder cron loop every ${tickMs}ms → ${cronBase}/api/cron/send-iit-reminders`);
-        setInterval(() => {
-          if (!secret) return;
-          fetch(`${cronBase}/api/cron/send-iit-reminders?key=${encodeURIComponent(secret)}`).catch((err) => {
-            console.warn('[dev] IIT cron tick failed:', err.message);
-          });
-        }, tickMs);
-      }
-
-      if (String(process.env.DEV_GUIDANCE_REMINDER_CRON_LOOP || '').trim() === '1') {
-        const secret = process.env.CRON_SECRET || process.env.GUIDEXPERT_CRON_SECRET;
-        const cronBase = `http://127.0.0.1:${PORT}`;
-        const tickMs = Math.max(
-          30_000,
-          parseInt(process.env.DEV_GUIDANCE_REMINDER_CRON_INTERVAL_MS || '60000', 10) || 60_000
-        );
-        console.log(
-          `[dev] Guidance reminder cron loop every ${tickMs}ms → ${cronBase}/api/cron/send-guidance-reminders`
-        );
-        setInterval(() => {
-          if (!secret) return;
-          fetch(`${cronBase}/api/cron/send-guidance-reminders?key=${encodeURIComponent(secret)}`).catch((err) => {
-            console.warn('[dev] Guidance reminder cron tick failed:', err.message);
-          });
-        }, tickMs);
-      }
-
-      if (String(process.env.DEV_IIT_TELUGU_SMS_CRON_LOOP || '').trim() === '1') {
-        const secret = process.env.CRON_SECRET || process.env.GUIDEXPERT_CRON_SECRET;
-        const cronBase = `http://127.0.0.1:${PORT}`;
-        const tickMs = Math.max(
-          30_000,
-          parseInt(process.env.DEV_IIT_TELUGU_SMS_CRON_INTERVAL_MS || '60000', 10) || 60_000
-        );
-        console.log(
-          `[dev] IIT Telugu SMS cron loop every ${tickMs}ms → ${cronBase}/api/cron/send-iit-telugu-sms`
-        );
-        setInterval(() => {
-          if (!secret) return;
-          fetch(`${cronBase}/api/cron/send-iit-telugu-sms?key=${encodeURIComponent(secret)}`).catch(
-            (err) => {
-              console.warn('[dev] IIT Telugu SMS cron tick failed:', err.message);
-            }
-          );
-        }, tickMs);
-      }
-    });
+    const { port: boundPort } = await bindAvailablePort(PORT);
+    console.log(`Server running on port ${boundPort}`);
+    console.log(`MongoDB connection established. Server ready to accept requests.`);
+    attachDevCronLoops(boundPort);
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
