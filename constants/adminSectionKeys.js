@@ -22,6 +22,7 @@ const ADMIN_SECTION_KEYS = [
   'one-on-one-counselors-admin',
   'training-feedback',
   'counsellor-occupations',
+  'pro-data',
   'influencer-tracking',
   'poster-downloads',
   'poster-automation',
