@@ -16,6 +16,9 @@ const { isPrivilegedPhone, getPrivilegedOtp } = require('../utils/privilegedAcce
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const CHUNK_SIZE = 2 * 1024 * 1024;
+// Vercel serverless incoming body cap is 4.5MB. Direct upload is JSON+base64 (~4/3 size),
+// so keep the raw PDF well under that limit.
+const DIRECT_UPLOAD_MAX_SIZE = 2 * 1024 * 1024;
 const OTP_EXPIRY_MINUTES = parseInt(process.env.OTP_EXPIRY_MINUTES || '10', 10);
 const OTP_EXPIRY_MS = OTP_EXPIRY_MINUTES * 60 * 1000;
 const MAX_VERIFY_ATTEMPTS = 3;
@@ -382,7 +385,7 @@ exports.adminUploadComplete = async (req, res) => {
   }
 };
 
-/** Direct upload for PDFs up to 10MB (single JSON request, avoids multipart issues). */
+/** Direct upload for small PDFs (single JSON request). Larger files must use chunked upload. */
 exports.adminUploadDirect = async (req, res) => {
   try {
     const { fileName, fileBase64, title, description, mimeType, fileSize } = req.body || {};
@@ -406,10 +409,10 @@ exports.adminUploadDirect = async (req, res) => {
     const buffer = Buffer.from(payload, 'base64');
     const expectedSize = Number(fileSize);
 
-    if (!Number.isFinite(expectedSize) || expectedSize <= 0 || expectedSize > 10 * 1024 * 1024) {
+    if (!Number.isFinite(expectedSize) || expectedSize <= 0 || expectedSize > DIRECT_UPLOAD_MAX_SIZE) {
       return res.status(400).json({
         success: false,
-        message: 'Direct upload supports PDF files up to 10MB. Use chunked upload for larger files.',
+        message: `Direct upload supports PDF files up to ${DIRECT_UPLOAD_MAX_SIZE} bytes. Use chunked upload for larger files.`,
       });
     }
     if (buffer.length !== expectedSize) {
@@ -781,3 +784,4 @@ exports.downloadFile = async (req, res) => {
 
 exports.CHUNK_SIZE = CHUNK_SIZE;
 exports.MAX_FILE_SIZE = MAX_FILE_SIZE;
+exports.DIRECT_UPLOAD_MAX_SIZE = DIRECT_UPLOAD_MAX_SIZE;
