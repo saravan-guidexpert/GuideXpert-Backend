@@ -6,8 +6,8 @@ const FIVE_MIN_MS = 5 * 60 * 1000;
 const SLOT_DURATION_MS = 60 * 60 * 1000;
 
 /**
- * Demo `/meet` gate: requires a completed demo booking once. **Live IST windows are not enforced**
- * (anyone with the link who passes OTP and has a booking may join at any time).
+ * Demo `/meet` gate: anyone who provides a valid 10-digit phone number is allowed to enter.
+ * Booking requirements and live IST windows are not enforced.
  *
  * @param {string} rawPhone
  * @param {Date} [_now] unused; kept for API stability / tests
@@ -16,9 +16,9 @@ const SLOT_DURATION_MS = 60 * 60 * 1000;
  *   message: string,
  *   phone?: string,
  *   selectedSlot?: string|null,
- *   originalBookingSlotStart?: string,
+ *   originalBookingSlotStart?: string|null,
  *   originalBookingSlotStartLabel?: string,
- *   slotStart?: string,
+ *   slotStart?: string|null,
  *   joinOpensAt?: string|null,
  *   slotEnd?: string|null,
  *   slotStartLabel?: string,
@@ -41,40 +41,25 @@ async function getDemoMeetEligibility(rawPhone, _now = new Date()) {
 
   const slotDate = doc?.step3Data?.slotDate;
   const slotStart = slotDate != null ? new Date(slotDate) : null;
-  const hasValidSlot =
-    doc &&
-    doc.isRegistered === true &&
-    typeof doc.currentStep === 'number' &&
-    doc.currentStep >= 3 &&
-    slotStart &&
-    !Number.isNaN(slotStart.getTime());
-
-  if (!hasValidSlot) {
-    return {
-      status: 'no_booking',
-      message:
-        'We could not find a registered demo booking for this number. Please complete registration and book a demo slot first.',
-      phone,
-    };
-  }
+  const validDate = slotStart && !Number.isNaN(slotStart.getTime());
 
   const bookingInfo = {
     phone,
-    selectedSlot: doc.step3Data?.selectedSlot || null,
-    originalBookingSlotStart: slotStart.toISOString(),
-    originalBookingSlotStartLabel: formatIst(slotStart),
+    selectedSlot: doc?.step3Data?.selectedSlot || null,
+    originalBookingSlotStart: validDate ? slotStart.toISOString() : null,
+    originalBookingSlotStartLabel: validDate ? formatIst(slotStart) : '',
   };
 
   return {
     status: 'allowed',
     message: 'You may join the live demo now.',
     ...bookingInfo,
-    slotStart: slotStart.toISOString(),
+    slotStart: validDate ? slotStart.toISOString() : null,
     joinOpensAt: null,
     slotEnd: null,
     joinOpensAtLabel: '',
     slotEndLabel: '',
-    slotStartLabel: formatIst(slotStart),
+    slotStartLabel: validDate ? formatIst(slotStart) : '',
   };
 }
 
