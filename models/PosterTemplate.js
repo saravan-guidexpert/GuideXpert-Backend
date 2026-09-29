@@ -23,6 +23,8 @@ const posterTemplateSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true, maxlength: 200 },
     description: { type: String, default: '', trim: true, maxlength: 500 },
     route: { type: String, required: true },
+    /** Which admin library owns this template. Legacy documents without the field are counsellor posters. */
+    audience: { type: String, enum: ['counsellor', 'pro'], default: 'counsellor', index: true },
     svgTemplate: { type: String, required: true },
     published: { type: Boolean, default: false },
     publishedAt: { type: Date, default: null },

@@ -1,5 +1,6 @@
 const PosterTemplate = require('../models/PosterTemplate');
 const TrainingFeedback = require('../models/TrainingFeedback');
+const ProFormSubmission = require('../models/ProFormSubmission');
 const { isPrivilegedPhone } = require('../utils/privilegedAccess');
 const {
   MAX_POSTER_SVG_CHARS,
@@ -15,6 +16,34 @@ function normalizeMobile10(raw) {
   if (raw == null) return '';
   const d = String(raw).replace(/\D/g, '').slice(-10);
   return d.length === 10 ? d : '';
+}
+
+const POSTER_AUDIENCES = ['counsellor', 'pro'];
+
+function firstScalar(value) {
+  if (Array.isArray(value)) return firstScalar(value[0]);
+  if (value == null) return '';
+  return String(value);
+}
+
+function normalizeAudience(raw) {
+  const s = firstScalar(raw).trim().toLowerCase();
+  return POSTER_AUDIENCES.includes(s) ? s : 'counsellor';
+}
+
+function requestedAudience(req) {
+  return normalizeAudience(
+    req.query?.audience || req.headers['x-poster-audience'] || req.body?.audience
+  );
+}
+
+/** Mongo filter for an audience; counsellor also matches legacy docs that predate the field. */
+function audienceFilter(audience) {
+  return audience === 'pro' ? { audience: 'pro' } : { audience: { $ne: 'pro' } };
+}
+
+function posterMatchesAudience(doc, audience) {
+  return normalizeAudience(doc?.audience) === audience;
 }
 
 /** Trim, strip query/hash, ensure leading slash, lowercase for stable matching. */
@@ -157,6 +186,7 @@ function toDto(doc) {
     name: o.name,
     description: o.description != null ? String(o.description) : '',
     route: o.route,
+    audience: normalizeAudience(o.audience),
     svgTemplate: o.svgTemplate,
     nameField,
     mobileField,
@@ -201,7 +231,8 @@ exports.normalizeRoute = normalizeRoute;
 
 exports.listPosters = async (req, res) => {
   try {
-    const rows = await PosterTemplate.find({}).sort({ updatedAt: -1 }).lean();
+    const audience = requestedAudience(req);
+    const rows = await PosterTemplate.find(audienceFilter(audience)).sort({ updatedAt: -1 }).lean();
     return res.json({ success: true, posters: rows.map((r) => toDto(r)) });
   } catch (err) {
     console.error('[listPosters]', err);
@@ -212,7 +243,9 @@ exports.listPosters = async (req, res) => {
 exports.getPoster = async (req, res) => {
   try {
     const doc = await PosterTemplate.findById(req.params.id).lean();
-    if (!doc) return res.status(404).json({ success: false, message: 'Poster not found.' });
+    if (!doc || !posterMatchesAudience(doc, requestedAudience(req))) {
+      return res.status(404).json({ success: false, message: 'Poster not found.' });
+    }
     return res.json({ success: true, poster: toDto(doc) });
   } catch (err) {
     console.error('[getPoster]', err);
@@ -290,6 +323,7 @@ exports.createPoster = async (req, res) => {
       name,
       description,
       route: routeNorm,
+      audience: normalizeAudience(body.audience),
       svgTemplate,
       nameField,
       mobileField,
@@ -325,7 +359,9 @@ exports.createPoster = async (req, res) => {
 exports.updatePoster = async (req, res) => {
   try {
     const doc = await PosterTemplate.findById(req.params.id);
-    if (!doc) return res.status(404).json({ success: false, message: 'Poster not found.' });
+    if (!doc || !posterMatchesAudience(doc, requestedAudience(req))) {
+      return res.status(404).json({ success: false, message: 'Poster not found.' });
+    }
 
     const body = req.body || {};
     if (body.name != null) {
@@ -400,7 +436,11 @@ exports.updatePoster = async (req, res) => {
 
 exports.deletePoster = async (req, res) => {
   try {
-    const result = await PosterTemplate.deleteOne({ _id: req.params.id });
+    const doc = await PosterTemplate.findById(req.params.id).lean();
+    if (!doc || !posterMatchesAudience(doc, requestedAudience(req))) {
+      return res.status(404).json({ success: false, message: 'Poster not found.' });
+    }
+    const result = await PosterTemplate.deleteOne({ _id: doc._id });
     if (result.deletedCount === 0) {
       return res.status(404).json({ success: false, message: 'Poster not found.' });
     }
@@ -431,7 +471,9 @@ exports.getPosterByRoute = async (req, res) => {
 exports.publishPoster = async (req, res) => {
   try {
     const doc = await PosterTemplate.findById(req.params.id);
-    if (!doc) return res.status(404).json({ success: false, message: 'Poster not found.' });
+    if (!doc || !posterMatchesAudience(doc, requestedAudience(req))) {
+      return res.status(404).json({ success: false, message: 'Poster not found.' });
+    }
     const routeNorm = normalizeRoute(doc.route);
     if (!isPosterPublicPath(routeNorm)) {
       return res.status(400).json({
@@ -455,7 +497,9 @@ exports.publishPoster = async (req, res) => {
 exports.unpublishPoster = async (req, res) => {
   try {
     const doc = await PosterTemplate.findById(req.params.id);
-    if (!doc) return res.status(404).json({ success: false, message: 'Poster not found.' });
+    if (!doc || !posterMatchesAudience(doc, requestedAudience(req))) {
+      return res.status(404).json({ success: false, message: 'Poster not found.' });
+    }
     doc.published = false;
     doc.publishedAt = null;
     doc.marketingFeatured = false;
@@ -479,7 +523,9 @@ exports.setPosterMarketingFeatured = async (req, res) => {
     const raw = req.body?.featured;
     const featured = raw === true || raw === 'true';
     const doc = await PosterTemplate.findById(req.params.id);
-    if (!doc) return res.status(404).json({ success: false, message: 'Poster not found.' });
+    if (!doc || !posterMatchesAudience(doc, requestedAudience(req))) {
+      return res.status(404).json({ success: false, message: 'Poster not found.' });
+    }
     if (featured) {
       if (!doc.published) {
         return res.status(400).json({
@@ -507,7 +553,8 @@ exports.setPosterMarketingFeatured = async (req, res) => {
  */
 exports.getMarketingPosters = async (req, res) => {
   try {
-    const docs = await PosterTemplate.find({ published: true })
+    const audience = requestedAudience(req);
+    const docs = await PosterTemplate.find({ published: true, ...audienceFilter(audience) })
       .sort({ marketingFeaturedAt: -1, publishedAt: -1, updatedAt: -1 })
       .lean();
     const posters = docs.map((doc) => toMarketingPosterDto(doc)).filter(Boolean);
@@ -523,11 +570,16 @@ exports.getMarketingPosters = async (req, res) => {
  */
 exports.getMarketingFeaturedPoster = async (req, res) => {
   try {
-    const docs = await PosterTemplate.find({ published: true })
+    const audience = requestedAudience(req);
+    const docs = await PosterTemplate.find({ published: true, ...audienceFilter(audience) })
       .sort({ marketingFeaturedAt: -1, publishedAt: -1, updatedAt: -1 })
       .lean();
     const posters = docs.map((doc) => toMarketingPosterDto(doc)).filter(Boolean);
-    const doc = await PosterTemplate.findOne({ published: true, marketingFeatured: true })
+    const doc = await PosterTemplate.findOne({
+      published: true,
+      marketingFeatured: true,
+      ...audienceFilter(audience),
+    })
       .select('name route marketingFeaturedAt')
       .lean();
     if (!doc) {
@@ -567,6 +619,25 @@ exports.verifyPosterActivation = async (req, res) => {
         success: true,
         name: 'Privileged QA',
         mobile,
+      });
+    }
+    if (normalizeAudience(poster.audience) === 'pro') {
+      const pro = await ProFormSubmission.findOne({
+        $or: [{ contactNumber: mobile }, { alternateNumber: mobile }],
+      })
+        .lean()
+        .select('name contactNumber');
+      if (!pro) {
+        return res.status(200).json({
+          success: false,
+          code: 'NOT_FOUND',
+          message: 'This number is not registered in PRO data.',
+        });
+      }
+      return res.json({
+        success: true,
+        name: pro.name || '',
+        mobile: pro.contactNumber || mobile,
       });
     }
     const fb = await TrainingFeedback.findOne({ mobileNumber: mobile }).lean().select('name mobileNumber');

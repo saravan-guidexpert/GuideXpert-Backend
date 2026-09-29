@@ -26,6 +26,7 @@ const ADMIN_SECTION_KEYS = [
   'influencer-tracking',
   'poster-downloads',
   'poster-automation',
+  'pro-poster-automation',
   'assessment-results',
   'webinar-progress',
   'bulk-certificates',
