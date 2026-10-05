@@ -34,6 +34,8 @@ const {
   patchOneOnOneCounselingLead,
   getOneOnOneCounselingFunnelStats,
 } = require('../controllers/oneOnOneCounselingController');
+const { listJeeSessionLeads } = require('../controllers/jeeSessionController');
+const { listMockTestLeads } = require('../controllers/mockTestController');
 const {
   createCounselor,
   listCounselors,
@@ -221,6 +223,8 @@ router.get('/counsellor-occupations', requireAdmin, getCounsellorOccupations);
 router.get('/training-form-responses', requireAdmin, getTrainingFormResponses);
 router.get('/nurturing', requireAdmin, getProgressCheckInSubmissions);
 router.get('/iitain-session-feedback', requireAdmin, getIitainSessionFeedbackSubmissions);
+router.get('/jee-sessions', requireAdmin, listJeeSessionLeads);
+router.get('/mock-test', requireAdmin, listMockTestLeads);
 router.get('/one-on-one-counseling-leads/funnel-stats', requireAdmin, getOneOnOneCounselingFunnelStats);
 router.get('/one-on-one-counseling-leads', requireAdmin, listOneOnOneCounselingLeads);
 router.patch('/one-on-one-counseling-leads/:id', requireAdmin, patchOneOnOneCounselingLead);
