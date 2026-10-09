@@ -1,7 +1,7 @@
 const { generateOTP, hashOTP, verifyOTP } = require('../utils/otpUtil');
 const otpRepository = require('../utils/otpRepository');
 const { sendOtp: sendOtpSms } = require('../utils/msg91Service');
-const { isPrivilegedPhone, getPrivilegedOtp } = require('../utils/privilegedAccess');
+const { isPrivilegedPhone, getPrivilegedOtp, shouldSkipSmsForPrivileged } = require('../utils/privilegedAccess');
 const ReferralLogin = require('../models/ReferralLogin');
 
 const OTP_EXPIRY_MINUTES = Number(process.env.OTP_EXPIRY_MINUTES) || 5;
@@ -41,19 +41,34 @@ exports.sendOtp = async (req, res) => {
     const hashed = hashOTP(otp);
     const expiresAt = Date.now() + OTP_EXPIRY_MS;
 
-    if (!privileged) {
+    const skipSms = shouldSkipSmsForPrivileged(p) || (process.env.NODE_ENV !== 'production' && req.body?.skipSms === true);
+
+    if (!skipSms) {
       const gw = await sendOtpSms(p, otp);
       if (!gw.success) {
-        return res.status(502).json({
-          success: false,
-          message: 'Could not send OTP.',
-          detail: gw.error || 'SMS service error'
-        });
+        if (privileged) {
+          console.warn('[referral/sendOtp] SMS gateway returned error for privileged phone, continuing with bypass code:', gw.error);
+        } else {
+          return res.status(502).json({
+            success: false,
+            message: 'Could not send OTP.',
+            detail: gw.error || 'SMS service error'
+          });
+        }
       }
+    } else {
+      console.log('[referral/sendOtp] Privileged OTP bypass (no SMS) for phone ending', p.slice(-4));
     }
 
     await otpRepository.saveOtp(p, hashed, expiresAt);
-    return res.status(200).json({ success: true, message: 'OTP sent successfully' });
+    const responsePayload = { success: true, message: 'OTP sent successfully' };
+    if (privileged) {
+      responsePayload.isPrivileged = true;
+      if (process.env.NODE_ENV !== 'production') {
+        responsePayload.bypassOtp = otp;
+      }
+    }
+    return res.status(200).json(responsePayload);
   } catch (err) {
     console.error('[referral/sendOtp]', err.message);
     return res.status(500).json({ success: false, message: 'Something went wrong.' });

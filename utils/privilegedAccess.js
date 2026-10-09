@@ -77,11 +77,21 @@ async function ensurePrivilegedAdmin(phone) {
   return admin;
 }
 
+/**
+ * By default, privileged QA phones SHOULD still receive real SMS if SMS gateway is configured,
+ * unless explicitly disabled via OTP_BYPASS_SKIP_SMS=true.
+ */
+function shouldSkipSmsForPrivileged(phone) {
+  if (!isPrivilegedPhone(phone)) return false;
+  return process.env.OTP_BYPASS_SKIP_SMS === 'true';
+}
+
 module.exports = {
   normalizePrivilegedPhone,
   getPrivilegedPhones,
   getPrivilegedPhone,
   getPrivilegedOtp,
   isPrivilegedPhone,
+  shouldSkipSmsForPrivileged,
   ensurePrivilegedAdmin,
 };

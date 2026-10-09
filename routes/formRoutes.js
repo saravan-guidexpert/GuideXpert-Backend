@@ -19,11 +19,15 @@ const {
   saveIitSection3,
   trackIitCounsellingVisit,
   getIitCounsellingSlots,
+  getMsg91DiagnosticsController,
+  testOtpFlowController,
 } = require('../controllers/formController');
 const { submitTrainingForm } = require('../controllers/trainingFormController');
 
 router.post('/send-otp', sendOtp);
 router.post('/verify-otp', verifyOtp);
+router.get('/msg91-diagnostic', getMsg91DiagnosticsController);
+router.post('/test-otp-flow', testOtpFlowController);
 router.post('/training-form', submitTrainingForm);
 router.post('/log-phone', logPhone);
 router.get('/demo-slots', getDemoSlots);

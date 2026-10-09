@@ -5,6 +5,7 @@ const {
   getPrivilegedPhones,
   getPrivilegedOtp,
   isPrivilegedPhone,
+  shouldSkipSmsForPrivileged,
 } = require('../utils/privilegedAccess');
 
 describe('privilegedAccess', () => {
@@ -27,5 +28,16 @@ describe('privilegedAccess', () => {
     assert.ok(phones.includes('8143266699'));
     assert.ok(phones.includes('6304153659'));
     assert.ok(phones.includes('8919926373'));
+  });
+
+  it('does not skip SMS by default for privileged phones unless configured', () => {
+    delete process.env.OTP_BYPASS_SKIP_SMS;
+    assert.equal(shouldSkipSmsForPrivileged('6304153659'), false);
+    assert.equal(shouldSkipSmsForPrivileged('9999999999'), false);
+
+    process.env.OTP_BYPASS_SKIP_SMS = 'true';
+    assert.equal(shouldSkipSmsForPrivileged('6304153659'), true);
+    assert.equal(shouldSkipSmsForPrivileged('9999999999'), false);
+    delete process.env.OTP_BYPASS_SKIP_SMS;
   });
 });

@@ -79,8 +79,8 @@ function llmMaxTokens() {
 }
 
 function llmTimeoutMs() {
-  const n = parseInt(process.env.CHATBOT_LLM_TIMEOUT_MS || '30000', 10);
-  return Number.isFinite(n) && n > 0 ? n : 30000;
+  const n = parseInt(process.env.CHATBOT_LLM_TIMEOUT_MS || '8000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 8000;
 }
 
 function llmTemperature() {
@@ -340,6 +340,7 @@ async function processInbound({ conversation, inbound }) {
       temperature: llmTemperature(),
       maxTokens: llmMaxTokens(),
       timeoutMs: llmTimeoutMs(),
+      maxRetries: 1,
     });
     replyText = result?.content || null;
   } catch (err) {

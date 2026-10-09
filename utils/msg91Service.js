@@ -29,7 +29,21 @@ async function sendOtp(phone, otp) {
   const digits = String(phone).replace(/\D/g, '');
   const mobile = digits.length >= 10 ? '91' + digits.slice(-10) : '91' + digits;
 
-  // Match exact API from your curl: mobile, authkey, otp_expiry, template_id
+  // 1. If template is 24 hex characters (Flow/Campaign template), try Flow API first
+  if (templateId.length === 24) {
+    try {
+      const flowRes = await sendOtpViaFlow(phone, otp);
+      if (flowRes.success) {
+        logSendResult(phone, true, JSON.stringify(flowRes.details));
+        return { success: true, details: flowRes.details, provider: 'flow' };
+      }
+      console.warn('[MSG91] Flow send failed, trying OTP API fallback:', flowRes.error);
+    } catch (flowErr) {
+      console.warn('[MSG91] Flow send exception, falling back to OTP API:', flowErr.message);
+    }
+  }
+
+  // URL parameters for compatibility
   const params = new URLSearchParams({
     mobile,
     authkey,
@@ -39,28 +53,71 @@ async function sendOtp(phone, otp) {
   });
 
   const url = `${MSG91_SEND_OTP_URL}?${params.toString()}`;
+  const requestBody = {
+    template_id: templateId,
+    mobile,
+    otp: String(otp),
+    otp_expiry: String(otpExpiry)
+  };
 
   try {
-    const res = await axios.get(url, {
+    // 2. Try standard MSG91 v5 POST with authkey header & JSON payload
+    const postRes = await axios.post(url, requestBody, {
+      headers: {
+        'authkey': authkey,
+        'content-type': 'application/json',
+        'accept': 'application/json'
+      },
       timeout: 15000,
       validateStatus: () => true
     });
 
-    if (res.status >= 400) {
-      const err = (res.data && (res.data.message || res.data.error)) || `API returned ${res.status}`;
-      logSendResult(phone, false, err);
-      return { success: false, error: String(err) };
+    console.log('[MSG91] Send OTP POST response:', {
+      status: postRes.status,
+      data: postRes.data,
+      templateIdPrefix: templateId.slice(0, 4) + '***',
+      templateIdLen: templateId.length,
+      mobile: `****${mobile.slice(-4)}`
+    });
+
+    if (postRes.status >= 200 && postRes.status < 400) {
+      const data = postRes.data || {};
+      if (data.type !== 'error' && data.status !== 'error' && data.success !== false) {
+        logSendResult(phone, true, JSON.stringify(data));
+        return { success: true, details: data };
+      }
     }
 
-    const data = res.data || {};
+    // 2. Fallback to GET for legacy or custom MSG91 endpoints
+    const getRes = await axios.get(url, {
+      headers: {
+        'authkey': authkey,
+        'accept': 'application/json'
+      },
+      timeout: 15000,
+      validateStatus: () => true
+    });
+
+    console.log('[MSG91] Send OTP GET response:', {
+      status: getRes.status,
+      data: getRes.data
+    });
+
+    if (getRes.status >= 400) {
+      const err = (getRes.data && (getRes.data.message || getRes.data.error)) || `API returned ${getRes.status}`;
+      logSendResult(phone, false, err);
+      return { success: false, error: String(err), details: getRes.data };
+    }
+
+    const data = getRes.data || {};
     if (data.type === 'error' || data.status === 'error' || data.success === false) {
       const err = data.message || data.error || 'MSG91 error';
       logSendResult(phone, false, err);
-      return { success: false, error: String(err) };
+      return { success: false, error: String(err), details: data };
     }
 
-    logSendResult(phone, true);
-    return { success: true };
+    logSendResult(phone, true, JSON.stringify(data));
+    return { success: true, details: data };
   } catch (e) {
     const msg = e.response && e.response.data
       ? (e.response.data.message || e.response.data.error)
@@ -484,8 +541,223 @@ async function sendIitTeluguFlowSms(phone, templateId, variables = {}) {
   }
 }
 
+/**
+ * Send OTP via MSG91 Flow API (alternative to OTP endpoint for Flow templates).
+ * Passes otp, OTP, code in template variables.
+ */
+async function sendOtpViaFlow(phone, otp) {
+  const authkey = process.env.MSG91_AUTH_KEY;
+  const templateId = process.env.MSG91_TEMPLATE_ID;
+
+  if (!authkey || !templateId) {
+    return { success: false, error: 'MSG91 not configured' };
+  }
+
+  const digits = String(phone).replace(/\D/g, '');
+  const mobile = digits.length >= 10 ? '91' + digits.slice(-10) : '91' + digits;
+
+  const recipients = [
+    {
+      mobiles: mobile,
+      otp: String(otp),
+      OTP: String(otp),
+      code: String(otp),
+      number: String(otp)
+    }
+  ];
+
+  const requestBody = {
+    template_id: templateId,
+    recipients
+  };
+
+  try {
+    const res = await axios.post(MSG91_FLOW_URL, requestBody, {
+      headers: {
+        accept: 'application/json',
+        authkey,
+        'content-type': 'application/json'
+      },
+      timeout: 15000,
+      validateStatus: () => true
+    });
+
+    console.log('[MSG91] Send OTP Flow response:', {
+      status: res.status,
+      data: res.data
+    });
+
+    if (res.status >= 200 && res.status < 400) {
+      const data = res.data || {};
+      if (data.type !== 'error' && data.status !== 'error' && data.success !== false) {
+        return { success: true, details: data };
+      }
+    }
+    return { success: false, error: res.data?.message || `Flow returned ${res.status}`, details: res.data };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function sendOtpDirect(phone, otp) {
+  const authkey = process.env.MSG91_AUTH_KEY;
+  const templateId = process.env.MSG91_TEMPLATE_ID;
+  const otpExpiry = Number(process.env.OTP_EXPIRY_MINUTES) || 5;
+
+  if (!authkey || !templateId) {
+    return { success: false, error: 'MSG91 not configured' };
+  }
+
+  const digits = String(phone).replace(/\D/g, '');
+  const mobile = digits.length >= 10 ? '91' + digits.slice(-10) : '91' + digits;
+
+  const params = new URLSearchParams({
+    mobile,
+    authkey,
+    otp_expiry: String(otpExpiry),
+    template_id: templateId,
+    otp: String(otp)
+  });
+
+  const url = `${MSG91_SEND_OTP_URL}?${params.toString()}`;
+  const requestBody = {
+    template_id: templateId,
+    mobile,
+    otp: String(otp),
+    otp_expiry: String(otpExpiry)
+  };
+
+  try {
+    const postRes = await axios.post(url, requestBody, {
+      headers: {
+        'authkey': authkey,
+        'content-type': 'application/json',
+        'accept': 'application/json'
+      },
+      timeout: 15000,
+      validateStatus: () => true
+    });
+    return { status: postRes.status, data: postRes.data, url: MSG91_SEND_OTP_URL };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+/**
+ * Diagnostic helper to inspect MSG91 credits, delivery logs, and template settings.
+ */
+async function getMsg91Diagnostics(phoneFilter) {
+  const authkey = process.env.MSG91_AUTH_KEY;
+  const templateId = process.env.MSG91_TEMPLATE_ID;
+
+  if (!authkey) {
+    return { configured: false, error: 'MSG91_AUTH_KEY missing' };
+  }
+
+  const results = {
+    configured: true,
+    authKeyPrefix: authkey.slice(0, 4) + '***',
+    authKeyLen: authkey.length,
+    templateIdPrefix: templateId ? templateId.slice(0, 4) + '***' : 'missing',
+    templateIdLen: templateId ? templateId.length : 0,
+    timestamp: new Date().toISOString()
+  };
+
+  const headers = {
+    authkey,
+    accept: 'application/json'
+  };
+
+  // 1. Check account credits
+  try {
+    const accRes = await axios.get('https://control.msg91.com/api/v1/account', {
+      headers,
+      timeout: 5000,
+      validateStatus: () => true
+    });
+    results.account = { status: accRes.status, data: accRes.data };
+  } catch (e) {
+    results.account = { error: e.message };
+  }
+
+  // 1b. Check balance using MSG91 balance endpoints
+  try {
+    const balRes = await axios.get(`https://api.msg91.com/api/balance.php?authkey=${authkey}&type=4`, {
+      timeout: 5000,
+      validateStatus: () => true
+    });
+    results.balanceTransactional = { status: balRes.status, data: balRes.data };
+  } catch (e) {
+    results.balanceTransactional = { error: e.message };
+  }
+
+  try {
+    const balRes1 = await axios.get(`https://api.msg91.com/api/balance.php?authkey=${authkey}&type=1`, {
+      timeout: 5000,
+      validateStatus: () => true
+    });
+    results.balancePromotional = { status: balRes1.status, data: balRes1.data };
+  } catch (e) {
+    results.balancePromotional = { error: e.message };
+  }
+
+  // 2. Query OTP delivery logs (last 3 days)
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const threeDaysAgo = new Date(now.getTime() - 3 * 86400000).toISOString().slice(0, 10);
+
+  try {
+    const otpLogsRes = await axios.get(
+      `https://control.msg91.com/api/v5/report/logs/p/otp?startDate=${threeDaysAgo}&endDate=${todayStr}`,
+      { headers, timeout: 8000, validateStatus: () => true }
+    );
+    let logData = otpLogsRes.data;
+    if (phoneFilter && Array.isArray(logData?.data)) {
+      const pDigits = String(phoneFilter).slice(-6);
+      logData = logData.data.filter(item => JSON.stringify(item).includes(pDigits));
+    }
+    results.otpLogs = { status: otpLogsRes.status, data: logData };
+  } catch (e) {
+    results.otpLogs = { error: e.message };
+  }
+
+  // 3. Query SMS delivery logs
+  try {
+    const smsLogsRes = await axios.get(
+      `https://control.msg91.com/api/v5/report/logs/sms?startDate=${threeDaysAgo}&endDate=${todayStr}`,
+      { headers, timeout: 8000, validateStatus: () => true }
+    );
+    let logData = smsLogsRes.data;
+    if (phoneFilter && Array.isArray(logData?.data)) {
+      const pDigits = String(phoneFilter).slice(-6);
+      logData = logData.data.filter(item => JSON.stringify(item).includes(pDigits));
+    }
+    results.smsLogs = { status: smsLogsRes.status, data: logData };
+  } catch (e) {
+    results.smsLogs = { error: e.message };
+  }
+
+  // 4. Query template details
+  if (templateId) {
+    try {
+      const tmplRes = await axios.get(
+        `https://control.msg91.com/api/v5/sms/getTemplateVersions?template_id=${templateId}`,
+        { headers, timeout: 5000, validateStatus: () => true }
+      );
+      results.templateDetails = { status: tmplRes.status, data: tmplRes.data };
+    } catch (e) {
+      results.templateDetails = { error: e.message };
+    }
+  }
+
+  return results;
+}
+
 module.exports = {
   sendOtp,
+  sendOtpDirect,
+  sendOtpViaFlow,
+  getMsg91Diagnostics,
   sendSlotConfirmationSms,
   sendBulkReminderSms,
   sendReminderSms,
@@ -495,3 +767,4 @@ module.exports = {
   sendReminder30MinSms,
   sendIitTeluguFlowSms,
 };
+

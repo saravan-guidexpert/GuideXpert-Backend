@@ -15,6 +15,18 @@ const rateLimitMap = new Map();
 
 const SUCCESSFUL_OUTBOUND_STATUSES = ['queued', 'submitted', 'sent', 'delivered', 'read'];
 
+let activeInlineProcessing = 0;
+
+function maxConcurrentInlineProcessing() {
+  const configured = parseInt(process.env.CHATBOT_MAX_CONCURRENT_INLINE || '4', 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : 4;
+}
+
+function inlineProcessingTimeoutMs() {
+  const configured = parseInt(process.env.CHATBOT_INBOUND_TIMEOUT_MS || '9000', 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : 9000;
+}
+
 function inboundProcessingStaleMs() {
   const configured = Number(process.env.CHATBOT_INBOUND_PROCESSING_STALE_MS);
   if (Number.isFinite(configured) && configured > 0) {
@@ -294,15 +306,59 @@ async function handleInboundWebhook(req, body, receivedAt = new Date()) {
 
   await touchInbound(conversation._id, receivedAt);
 
+  const maxConcurrent = maxConcurrentInlineProcessing();
+  if (activeInlineProcessing >= maxConcurrent) {
+    console.warn(
+      `[chatbot] High inbound webhook burst (${activeInlineProcessing}/${maxConcurrent} active), deferring to background cron replay`,
+      maskPhoneTail(parsed.phone10)
+    );
+    return { handled: true, inboundId: String(inboundDoc._id), deferredToCron: true };
+  }
+
+  activeInlineProcessing += 1;
+  const timeoutMs = inlineProcessingTimeoutMs();
+  let timer = null;
   try {
-    await executeClaimedInboundProcessing({
+    const processingPromise = executeClaimedInboundProcessing({
       conversation,
       inbound: inboundDoc,
       leadLinks,
       phone10: parsed.phone10,
     });
-  } catch (_err) {
-    // executeClaimedInboundProcessing already persisted failed status
+
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error('INLINE_PROCESSING_TIMEOUT');
+        err.code = 'ETIMEDOUT';
+        reject(err);
+      }, timeoutMs);
+    });
+
+    await Promise.race([processingPromise, timeoutPromise]);
+  } catch (err) {
+    if (err && err.message === 'INLINE_PROCESSING_TIMEOUT') {
+      console.warn(
+        `[chatbot] Inbound inline processing exceeded ${timeoutMs}ms, deferring to cron replay`,
+        maskPhoneTail(parsed.phone10)
+      );
+      try {
+        await WhatsAppInboundMessage.updateOne(
+          { _id: inboundDoc._id, processStatus: 'processing' },
+          {
+            $set: {
+              processStatus: 'pending',
+              processError: 'inline_timeout_deferred_to_cron',
+              updatedAt: new Date(),
+            },
+          }
+        );
+      } catch (_saveErr) {
+        // Ignored, stale recovery cron will reclaim
+      }
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    activeInlineProcessing = Math.max(0, activeInlineProcessing - 1);
   }
 
   return { handled: true, inboundId: String(inboundDoc._id) };

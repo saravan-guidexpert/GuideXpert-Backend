@@ -142,7 +142,8 @@ async function extractProfilePatch({ knownProfile, lastBotMessage, userText }) {
       ],
       temperature: 0,
       maxTokens: 200,
-      timeoutMs: 12000,
+      timeoutMs: 4000,
+      maxRetries: 0,
     });
     return parseJsonObject(result?.content);
   } catch (err) {
