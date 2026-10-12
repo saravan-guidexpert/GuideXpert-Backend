@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const SalesAnalyticsSavedUtmLink = require('../models/SalesAnalyticsSavedUtmLink');
 const { getMongoQuotaExceededMessage } = require('../utils/mongoErrorMessage');
 
-const DEFAULT_BASE_URL = 'https://guidexpert.co.in/register';
+const DEFAULT_BASE_URL = 'https://www.guidexpert.co.in/become-counsellor';
 const PLATFORM_TO_SOURCE = {
   Instagram: 'instagram',
   YouTube: 'youtube',
@@ -15,9 +15,11 @@ const PLATFORM_TO_SOURCE = {
 };
 
 function getRegistrationBaseUrl() {
-  const raw = process.env.REGISTRATION_BASE_URL || DEFAULT_BASE_URL;
-  const base = (raw && typeof raw === 'string' && raw.trim()) ? raw.trim() : DEFAULT_BASE_URL;
-  return base.replace(/\/?$/, '');
+  const raw = process.env.REGISTRATION_BASE_URL;
+  if (raw && typeof raw === 'string' && /^https?:\/\//i.test(raw.trim())) {
+    return raw.trim().replace(/\/?$/, '');
+  }
+  return DEFAULT_BASE_URL;
 }
 
 function buildRegistrationUtmUrl(influencerName, platform, campaign) {
