@@ -25,6 +25,7 @@ function buildChatCompletion(provider) {
     temperature = 0.2,
     maxTokens = 400,
     timeoutMs,
+    maxRetries,
   }) {
     const resolvedMessages = Array.isArray(messages) && messages.length
       ? messages.map((m) => ({
@@ -41,6 +42,7 @@ function buildChatCompletion(provider) {
       temperature,
       maxTokens,
       timeoutMs,
+      maxRetries,
     });
 
     return {

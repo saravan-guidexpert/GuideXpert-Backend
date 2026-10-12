@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const InfluencerLink = require('../models/InfluencerLink');
 const FormSubmission = require('../models/FormSubmission');
 
-const DEFAULT_BASE_URL = 'https://guidexpert.co.in/register';
+const DEFAULT_BASE_URL = 'https://www.guidexpert.co.in/become-counsellor';
 const DEFAULT_IIT_COUNSELLING_PAGE_URL = 'https://guidexpert.co.in/iit-counselling';
 const PLATFORM_TO_SOURCE = {
   Instagram: 'instagram',
@@ -16,8 +16,10 @@ const PLATFORM_TO_SOURCE = {
 };
 
 function normalizeBaseUrl(raw, fallback) {
-  const base = (raw && typeof raw === 'string' && raw.trim()) ? raw.trim() : fallback;
-  return base.replace(/\/?$/, '');
+  if (!raw || typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return fallback;
+  return trimmed.replace(/\/?$/, '');
 }
 
 function getRegistrationBaseUrl() {

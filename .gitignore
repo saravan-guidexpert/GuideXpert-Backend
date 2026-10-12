@@ -17,3 +17,4 @@ smoke-results/
 
 # Local one-off smoke scripts
 *.tmp.js
+.env*

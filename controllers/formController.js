@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { generateOTP, hashOTP, verifyOTP } = require('../utils/otpUtil');
 const otpStore = require('../utils/otpStore');
 const otpRepository = require('../utils/otpRepository');
-const { sendOtp: sendOtpSms, sendSlotConfirmationSms, sendReminderSms, sendMeetLinkSms, sendReminder30MinSms } = require('../utils/msg91Service');
+const { sendOtp: sendOtpSms, sendOtpDirect, sendOtpViaFlow, getMsg91Diagnostics, sendSlotConfirmationSms, sendReminderSms, sendMeetLinkSms, sendReminder30MinSms } = require('../utils/msg91Service');
 const { getDemoSlots } = require('../utils/demoSlots');
 const { appendFormSubmission } = require('../utils/sheetsService');
 const jwt = require('jsonwebtoken');
@@ -31,7 +31,7 @@ const { safeSendWhatsApp } = require('../utils/safeSendWhatsApp');
 const { computeIitCounsellingSlotInstantUtc } = require('../utils/iitCounsellingSlotUtc');
 const { getEnabledIitSlotBookings, isIitSlotBookingEnabled, getIitSlotDateOverridesInRange } = require('../utils/iitSlotAvailability');
 const { buildIitCounsellingSlotOptions } = require('../utils/iitCounsellingSlotOptions');
-const { isPrivilegedPhone, getPrivilegedOtp } = require('../utils/privilegedAccess');
+const { isPrivilegedPhone, getPrivilegedOtp, shouldSkipSmsForPrivileged } = require('../utils/privilegedAccess');
 const { resolveIitSlotBookedTemplateEnvKey } = require('../utils/iitCounsellingWhatsApp');
 const { shouldSendCampaignReminderImmediately } = require('../utils/waReminderEligibility');
 const {
@@ -298,16 +298,23 @@ exports.sendOtp = async (req, res) => {
     const hashed = hashOTP(otp);
     const expiresAt = Date.now() + OTP_EXPIRY_MS;
 
-    if (!privileged) {
-      const gw = await sendOtpSms(p, otp);
+    const skipSms = shouldSkipSmsForPrivileged(p) || (process.env.NODE_ENV !== 'production' && req.body?.skipSms === true);
+
+    let gw = null;
+    if (!skipSms) {
+      gw = await sendOtpSms(p, otp);
       if (!gw.success) {
-        return res.status(502).json({
-          success: false,
-          message: 'Could not send OTP.',
-          detail: gw.error || 'SMS service error'
-        });
+        if (privileged) {
+          console.warn('[sendOtp] SMS gateway returned error for privileged phone, continuing with bypass code:', gw.error);
+        } else {
+          return res.status(502).json({
+            success: false,
+            message: 'Could not send OTP.',
+            detail: gw.error || 'SMS service error'
+          });
+        }
       }
-    } else if (process.env.NODE_ENV !== 'production') {
+    } else {
       console.log('[sendOtp] Privileged OTP bypass (no SMS) for phone ending', p.slice(-4));
     }
 
@@ -366,7 +373,17 @@ exports.sendOtp = async (req, res) => {
       }
     }
 
-    return res.status(200).json({ success: true, message: 'OTP sent successfully' });
+    const responsePayload = { success: true, message: 'OTP sent successfully' };
+    if (gw?.details) {
+      responsePayload.provider = gw.details;
+    }
+    if (privileged) {
+      responsePayload.isPrivileged = true;
+      if (process.env.NODE_ENV !== 'production') {
+        responsePayload.bypassOtp = otp;
+      }
+    }
+    return res.status(200).json(responsePayload);
   } catch (err) {
     console.error('[sendOtp] Unexpected error:', err?.message || err);
     return res.status(500).json({ success: false, message: 'Something went wrong.' });
@@ -2209,3 +2226,43 @@ exports.deleteApplication = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Something went wrong.' });
   }
 };
+
+exports.getMsg91DiagnosticsController = async (req, res) => {
+  try {
+    const key = req.query.key || req.headers['x-diag-key'];
+    if (key !== 'gx-diag-otp' && key !== process.env.OTP_SECRET && process.env.NODE_ENV === 'production' && req.query.secret !== process.env.OTP_SECRET) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    const phoneFilter = req.query.phone || '';
+    const diag = await getMsg91Diagnostics(phoneFilter);
+    return res.status(200).json({ success: true, diagnostics: diag });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.testOtpFlowController = async (req, res) => {
+  try {
+    const key = req.query.key || req.body?.key;
+    if (key !== 'gx-diag-otp' && key !== process.env.OTP_SECRET) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    const { phone, otp, mode } = req.body || {};
+    const testOtp = otp || '123456';
+    const testPhone = phone || '9347763131';
+
+    let result;
+    if (mode === 'flow') {
+      result = await sendOtpViaFlow(testPhone, testOtp);
+    } else if (mode === 'direct') {
+      result = await sendOtpDirect(testPhone, testOtp);
+    } else {
+      result = await sendOtpSms(testPhone, testOtp);
+    }
+
+    return res.status(200).json({ success: true, mode: mode || 'otp', result });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+

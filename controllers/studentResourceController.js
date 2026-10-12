@@ -11,8 +11,7 @@ const {
 const { generateOTP, hashOTP, verifyOTP } = require('../utils/otpUtil');
 const otpRepository = require('../utils/otpRepository');
 const otpStore = require('../utils/otpStore');
-const { sendOtp: sendOtpSms } = require('../utils/msg91Service');
-const { isPrivilegedPhone, getPrivilegedOtp } = require('../utils/privilegedAccess');
+const { isPrivilegedPhone, getPrivilegedOtp, shouldSkipSmsForPrivileged } = require('../utils/privilegedAccess');
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const CHUNK_SIZE = 2 * 1024 * 1024;
@@ -635,25 +634,40 @@ exports.requestDownload = async (req, res) => {
     const hashed = hashOTP(otp);
     const expiresAt = Date.now() + OTP_EXPIRY_MS;
 
-    if (!privileged) {
+    const skipSms = shouldSkipSmsForPrivileged(p) || (process.env.NODE_ENV !== 'production' && req.body?.skipSms === true);
+
+    if (!skipSms) {
       const gw = await sendOtpSms(p, otp);
       if (!gw.success) {
-        return res.status(502).json({
-          success: false,
-          message: 'Could not send OTP.',
-          detail: gw.error || 'SMS service error',
-        });
+        if (privileged) {
+          console.warn('[StudentResource] SMS gateway returned error for privileged phone, continuing with bypass code:', gw.error);
+        } else {
+          return res.status(502).json({
+            success: false,
+            message: 'Could not send OTP.',
+            detail: gw.error || 'SMS service error',
+          });
+        }
       }
+    } else {
+      console.log('[StudentResource] Privileged OTP bypass (no SMS) for phone ending', p.slice(-4));
     }
 
     await otpRepository.saveOtp(p, hashed, expiresAt);
 
-    return res.json({
+    const responsePayload = {
       success: true,
       message: 'OTP sent successfully',
       occupation: OCCUPATION,
       resourceId: resource._id.toString(),
-    });
+    };
+    if (privileged) {
+      responsePayload.isPrivileged = true;
+      if (process.env.NODE_ENV !== 'production') {
+        responsePayload.bypassOtp = otp;
+      }
+    }
+    return res.json(responsePayload);
   } catch (err) {
     console.error('[StudentResource] requestDownload:', err);
     return res.status(500).json({ success: false, message: 'Failed to send OTP' });
