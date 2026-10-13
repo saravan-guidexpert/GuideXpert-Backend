@@ -71,6 +71,7 @@ async function sendOtp(phone, otp) {
     template_id: templateId,
     mobile,
     otp: String(otp),
+    OTP: String(otp),
     otp_expiry: String(otpExpiry)
   };
 
@@ -653,6 +654,7 @@ async function sendOtpDirect(phone, otp) {
     template_id: templateId,
     mobile,
     otp: String(otp),
+    OTP: String(otp),
     otp_expiry: String(otpExpiry)
   };
 
