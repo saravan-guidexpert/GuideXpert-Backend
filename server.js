@@ -67,6 +67,9 @@ const { getPosterDownloads, getPosterDownloadStats } = require('./controllers/po
 const { getCollegeComparisons } = require('./controllers/collegeComparisonAdminController');
 const { checkPosterEligibility, trackPosterDownload } = require('./controllers/posterController');
 const requireAdmin = require('./middleware/requireAdmin');
+const requireAdminSection = require('./middleware/requireAdminSection');
+const crmRoutes = require('./routes/crmRoutes');
+const { CRM_SECTION_KEY } = require('./constants/crm');
 const {
   getWhatsAppConfigStatus,
   logWhatsAppConfigWarnings,
@@ -260,6 +263,12 @@ app.use('/api/admin/whatsapp-chat', requireAdmin, whatsappChatAdminRoutes);
 app.use('/api/admin/ai-calls', requireAdmin, aiCallsAdminRoutes);
 app.use('/api/admin/lead-insights', requireAdmin, leadInsightsRoutes);
 app.use('/api/admin/analytics', requireAdmin, analyticsExecutiveRoutes);
+app.use(
+  '/api/admin/crm',
+  requireAdmin,
+  requireAdminSection(CRM_SECTION_KEY, 'Consultancy CRM access is required.'),
+  crmRoutes
+);
 app.use('/api/admin', adminRoutes);
 app.use('/api/resources', require('./routes/resourceRoutes'));
 app.get('/api/student-workspace-updates', require('./controllers/studentWorkspaceUpdateController').publicList);
