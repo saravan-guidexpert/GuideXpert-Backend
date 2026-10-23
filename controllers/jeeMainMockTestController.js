@@ -5,6 +5,8 @@ const { ADMIN_LIST_MAX_LIMIT } = require('../constants/listPagination');
 const otpRepository = require('../utils/otpRepository');
 const otpStore = require('../utils/otpStore');
 const VerifiedPhoneSession = require('../models/VerifiedPhoneSession');
+const IitCounsellingVisit = require('../models/IitCounsellingVisit');
+const IitCounsellingUtmSavedLink = require('../models/IitCounsellingUtmSavedLink');
 
 const INDIAN_MOBILE_REGEX = /^[6-9]\d{9}$/;
 const VERIFIED_TTL_MS = 15 * 60 * 1000;
@@ -40,7 +42,7 @@ function requiredMobile(value, label) {
   return { digits };
 }
 
-function mapLead(doc) {
+function mapLead(doc, influencer = {}) {
   return {
     id: String(doc._id),
     studentName: doc.studentName,
@@ -56,7 +58,102 @@ function mapLead(doc) {
     submittedAt: doc.submittedAt || null,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
+    influencerName: influencer.influencerName || '',
+    utm_source: influencer.utm_source || '',
+    utm_medium: influencer.utm_medium || '',
+    utm_campaign: influencer.utm_campaign || '',
+    utm_content: influencer.utm_content || '',
   };
+}
+
+function normalizeUtmToken(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function parseUtmParams(href) {
+  if (!href || typeof href !== 'string') return null;
+  try {
+    const url = new URL(href);
+    return {
+      utm_source: url.searchParams.get('utm_source') || '',
+      utm_medium: url.searchParams.get('utm_medium') || '',
+      utm_campaign: url.searchParams.get('utm_campaign') || '',
+      utm_content: url.searchParams.get('utm_content') || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildInfluencerLookup(links) {
+  const byFullKey = new Map();
+  const byContent = new Map();
+  for (const link of links || []) {
+    const name = String(link.influencerName || '').trim();
+    if (!name) continue;
+    const parsed = parseUtmParams(link.utmLink) || {};
+    const content = parsed.utm_content || name;
+    const fullKey = [parsed.utm_source, parsed.utm_medium, parsed.utm_campaign, content].map(normalizeUtmToken).join('|');
+    if (!byFullKey.has(fullKey)) byFullKey.set(fullKey, name);
+    const contentKey = normalizeUtmToken(content);
+    if (contentKey && !byContent.has(contentKey)) byContent.set(contentKey, name);
+    const nameKey = normalizeUtmToken(name);
+    if (nameKey && !byContent.has(nameKey)) byContent.set(nameKey, name);
+  }
+  return { byFullKey, byContent };
+}
+
+function attributionOf(doc) {
+  return {
+    utm_source: doc?.utm_source || '',
+    utm_medium: doc?.utm_medium || '',
+    utm_campaign: doc?.utm_campaign || '',
+    utm_content: doc?.utm_content || '',
+  };
+}
+
+function hasAttribution(attr) {
+  return Boolean(attr.utm_source || attr.utm_medium || attr.utm_campaign || attr.utm_content);
+}
+
+function resolveInfluencerName(attr, lookup) {
+  const content = String(attr.utm_content || '').trim();
+  const fullKey = [attr.utm_source, attr.utm_medium, attr.utm_campaign, content].map(normalizeUtmToken).join('|');
+  const fromFull = lookup.byFullKey.get(fullKey);
+  if (fromFull) return fromFull;
+  const fromContent = lookup.byContent.get(normalizeUtmToken(content));
+  if (fromContent) return fromContent;
+  if (normalizeUtmToken(attr.utm_medium) === 'influencer' && content) return content;
+  return '';
+}
+
+async function withInfluencers(records) {
+  if (!records.length) return [];
+  const ids = records.map((doc) => doc._id);
+  const [visits, links] = await Promise.all([
+    IitCounsellingVisit.find({
+      pageKey: 'mainPage',
+      jeeMainMockTestLeadId: { $in: ids },
+    })
+      .select('jeeMainMockTestLeadId utm_source utm_medium utm_campaign utm_content visitedAt')
+      .sort({ visitedAt: -1 })
+      .lean(),
+    IitCounsellingUtmSavedLink.find({}).select('influencerName utmLink').lean(),
+  ]);
+  const visitByLead = new Map();
+  for (const visit of visits) {
+    const key = String(visit.jeeMainMockTestLeadId);
+    if (!visitByLead.has(key)) visitByLead.set(key, visit);
+  }
+  const lookup = buildInfluencerLookup(links);
+  return records.map((doc) => {
+    const fromLead = attributionOf(doc);
+    const attr = hasAttribution(fromLead) ? fromLead : attributionOf(visitByLead.get(String(doc._id)));
+    return mapLead(doc, {
+      ...attr,
+      influencerName: resolveInfluencerName(attr, lookup),
+    });
+  });
 }
 
 function validationMessage(err) {
@@ -89,12 +186,57 @@ function buildSearchQuery(q) {
     { location: { $regex: safe, $options: 'i' } },
     { currentStudying: { $regex: safe, $options: 'i' } },
     { remarks: { $regex: safe, $options: 'i' } },
+    { utm_content: { $regex: safe, $options: 'i' } },
+    { utm_source: { $regex: safe, $options: 'i' } },
+    { utm_campaign: { $regex: safe, $options: 'i' } },
   ];
   if (digits) {
     clauses.push({ mobileNumber: { $regex: digits } });
     clauses.push({ whatsappNumber: { $regex: digits } });
   }
   return { $or: clauses };
+}
+
+function optionalUtm(body) {
+  const fields = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content'];
+  const out = {};
+  for (const field of fields) {
+    const value = typeof body?.[field] === 'string' ? body[field].trim().slice(0, 200) : '';
+    if (value) out[field] = value;
+  }
+  const visitorFingerprint = typeof body?.visitorFingerprint === 'string' ? body.visitorFingerprint.trim().slice(0, 200) : '';
+  if (visitorFingerprint) out.visitorFingerprint = visitorFingerprint;
+  return out;
+}
+
+async function linkJeeLeadToMainPageVisit(doc, attribution) {
+  try {
+    const visitorFingerprint = attribution.visitorFingerprint || '';
+    if (visitorFingerprint) {
+      await IitCounsellingVisit.findOneAndUpdate(
+        { visitorFingerprint, pageKey: 'mainPage', jeeMainMockTestLeadId: null },
+        { $set: { jeeMainMockTestLeadId: doc._id } },
+        { sort: { visitedAt: -1 } }
+      );
+      return;
+    }
+    if (!attribution.utm_content) return;
+    const visitMatch = {
+      pageKey: 'mainPage',
+      jeeMainMockTestLeadId: null,
+      utm_content: attribution.utm_content,
+    };
+    if (attribution.utm_campaign) visitMatch.utm_campaign = attribution.utm_campaign;
+    if (attribution.utm_source) visitMatch.utm_source = attribution.utm_source;
+    if (attribution.utm_medium) visitMatch.utm_medium = attribution.utm_medium;
+    await IitCounsellingVisit.findOneAndUpdate(
+      visitMatch,
+      { $set: { jeeMainMockTestLeadId: doc._id } },
+      { sort: { visitedAt: -1 } }
+    );
+  } catch (err) {
+    console.error('[linkJeeLeadToMainPageVisit]', err);
+  }
 }
 
 function parseLeadId(body) {
@@ -124,6 +266,7 @@ exports.saveJeeMainMockTestSection1 = async (req, res) => {
       });
     }
 
+    const attribution = optionalUtm(body);
     const doc = await JeeMainMockTestLead.findOneAndUpdate(
       { mobileNumber: mobile.digits, formCompleted: { $ne: true } },
       {
@@ -133,10 +276,12 @@ exports.saveJeeMainMockTestSection1 = async (req, res) => {
           otpVerified: true,
           currentStep: 1,
           formCompleted: false,
+          ...attribution,
         },
       },
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
     );
+    await linkJeeLeadToMainPageVisit(doc, attribution);
 
     return res.status(200).json({
       success: true,
@@ -300,7 +445,7 @@ exports.listJeeMainMockTestLeads = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: records.map(mapLead),
+      data: await withInfluencers(records),
       pagination: {
         page,
         limit,

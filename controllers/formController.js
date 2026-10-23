@@ -1479,6 +1479,7 @@ exports.trackIitCounsellingVisit = async (req, res) => {
     let pageKey = 'iitCounselling';
     if (pageKeyRaw === 'oneOnOneSession') pageKey = 'oneOnOneSession';
     else if (pageKeyRaw === 'guidanceBookingConfirmation') pageKey = 'guidanceBookingConfirmation';
+    else if (pageKeyRaw === 'mainPage') pageKey = 'mainPage';
 
     const doc = await IitCounsellingVisit.create({
       pageKey,
