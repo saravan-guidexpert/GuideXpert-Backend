@@ -35,6 +35,7 @@ const iitainSessionFeedbackRoutes = require('./routes/iitainSessionFeedbackRoute
 const oneOnOneCounselingRoutes = require('./routes/oneOnOneCounselingRoutes');
 const jeeSessionRoutes = require('./routes/jeeSessionRoutes');
 const mockTestRoutes = require('./routes/mockTestRoutes');
+const jeeMainMockTestRoutes = require('./routes/jeeMainMockTestRoutes');
 const guidanceBookingRoutes = require('./routes/guidanceBookingRoutes');
 const oneOnOneCounselorRoutes = require('./routes/oneOnOneCounselorRoutes');
 const referralRoutes = require('./routes/referralRoutes');
@@ -282,6 +283,7 @@ app.use('/api/iitain-session-feedback', iitainSessionFeedbackRoutes);
 app.use('/api/one-on-one-counseling', oneOnOneCounselingRoutes);
 app.use('/api/jee-sessions', jeeSessionRoutes);
 app.use('/api/mock-test', mockTestRoutes);
+app.use('/api/jee-main-mock-test', jeeMainMockTestRoutes);
 app.use('/api/guidance-booking', guidanceBookingRoutes);
 app.use('/api/one-on-one-counselor', oneOnOneCounselorRoutes);
 app.use('/api/referral', referralRoutes);
