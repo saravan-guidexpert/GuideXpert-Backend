@@ -8,6 +8,11 @@ const { isOsviConfigured } = require('../utils/osviService');
 const { processOsviOutboundForPhone } = require('../utils/osviOutboundProcessor');
 const { hasCronSecretConfigured, isValidCronSecret } = require('../utils/cronSecret');
 const {
+  cronFailurePayload,
+  logDbError,
+  safeErrorSummary,
+} = require('../utils/mongoRetry');
+const {
   dispatchDueReminderJobs,
   cronJobKeyForKind
 } = require('../services/whatsappReminderJobDispatcher');
@@ -77,6 +82,19 @@ async function finishCronRun(run, baseStats, overrides = {}) {
   );
 }
 
+async function failCron(res, error, label, cronRun) {
+  logDbError(label, error);
+  if (cronRun) {
+    await finishCronRun(
+      cronRun,
+      { found: 0, waAttempted: 0, waSucceeded: 0, waFailed: 0, smsSent: 0, smsFailed: 0 },
+      { success: false, errorSummary: safeErrorSummary(error) }
+    ).catch(() => {});
+  }
+  const { status, body } = cronFailurePayload(error);
+  return res.status(status).json(body);
+}
+
 /**
  * P3: dispatch due WhatsAppReminderJob rows for one campaign kind.
  */
@@ -123,19 +141,7 @@ async function runReminderJobCron(req, res, messageKind) {
       stats: payload
     });
   } catch (error) {
-    console.error(`[Cron] Error in ${jobKey}:`, error);
-    if (cronRun) {
-      await finishCronRun(
-        cronRun,
-        { found: 0, waAttempted: 0, waSucceeded: 0, waFailed: 0 },
-        { success: false, errorSummary: error.message }
-      ).catch(() => {});
-    }
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error',
-      error: error.message
-    });
+    return failCron(res, error, `[Cron] Error in ${jobKey}:`, cronRun);
   }
 }
 
@@ -193,19 +199,7 @@ router.get('/send-guidance-reminders', verifyCronSecret, async (req, res) => {
       stats: payload,
     });
   } catch (error) {
-    console.error('[Cron] Error in send-guidance-reminders:', error);
-    if (cronRun) {
-      await finishCronRun(
-        cronRun,
-        { found: 0, waAttempted: 0, waSucceeded: 0, waFailed: 0 },
-        { success: false, errorSummary: error.message }
-      ).catch(() => {});
-    }
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error',
-      error: error.message,
-    });
+    return failCron(res, error, '[Cron] Error in send-guidance-reminders:', cronRun);
   }
 });
 
@@ -248,19 +242,7 @@ router.get('/send-iit-reminders', verifyCronSecret, async (req, res) => {
       stats: payload,
     });
   } catch (error) {
-    console.error('[Cron] Error in send-iit-reminders:', error);
-    if (cronRun) {
-      await finishCronRun(
-        cronRun,
-        { found: 0, waAttempted: 0, waSucceeded: 0, waFailed: 0 },
-        { success: false, errorSummary: error.message }
-      ).catch(() => {});
-    }
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error',
-      error: error.message,
-    });
+    return failCron(res, error, '[Cron] Error in send-iit-reminders:', cronRun);
   }
 });
 
@@ -306,19 +288,7 @@ router.get('/send-iit-telugu-sms', verifyCronSecret, async (req, res) => {
       stats: payload,
     });
   } catch (error) {
-    console.error('[Cron] Error in send-iit-telugu-sms:', error);
-    if (cronRun) {
-      await finishCronRun(
-        cronRun,
-        { found: 0, smsSent: 0, smsFailed: 0, waAttempted: 0, waSucceeded: 0, waFailed: 0 },
-        { success: false, errorSummary: error.message }
-      ).catch(() => {});
-    }
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error',
-      error: error.message,
-    });
+    return failCron(res, error, '[Cron] Error in send-iit-telugu-sms:', cronRun);
   }
 });
 
@@ -362,18 +332,7 @@ router.get('/retry-whatsapp', verifyCronSecret, async (req, res) => {
       stats: batch
     });
   } catch (error) {
-    console.error('[Cron] retry-whatsapp:', error);
-    if (cronRun) {
-      await finishCronRun(
-        cronRun,
-        { found: 0, smsSent: 0, smsFailed: 0, waAttempted: 0, waSucceeded: 0, waFailed: 0, retriesAttempted: 0, flagsUpdated: 0 },
-        { success: false, errorSummary: error.message }
-      ).catch(() => {});
-    }
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Internal server error'
-    });
+    return failCron(res, error, '[Cron] retry-whatsapp:', cronRun);
   }
 });
 
@@ -412,11 +371,7 @@ router.get('/osvi-outbound-due', verifyCronSecret, async (req, res) => {
       results
     });
   } catch (error) {
-    console.error('[Cron] osvi-outbound-due:', error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Internal server error'
-    });
+    return failCron(res, error, '[Cron] osvi-outbound-due:');
   }
 });
 
@@ -434,11 +389,7 @@ router.get('/process-chatbot-inbound', verifyCronSecret, async (req, res) => {
       expired,
     });
   } catch (error) {
-    console.error('[Cron] process-chatbot-inbound:', error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    });
+    return failCron(res, error, '[Cron] process-chatbot-inbound:');
   }
 });
 
@@ -448,11 +399,7 @@ router.get('/analytics/evaluate-alerts', verifyCronSecret, async (req, res) => {
     const stats = await evaluateAllAlerts();
     return res.status(200).json({ success: true, data: stats });
   } catch (error) {
-    console.error('[Cron] analytics/evaluate-alerts:', error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    });
+    return failCron(res, error, '[Cron] analytics/evaluate-alerts:');
   }
 });
 
@@ -466,11 +413,7 @@ router.get('/analytics/daily-report', verifyCronSecret, async (req, res) => {
     });
     return res.status(200).json({ success: true, data });
   } catch (error) {
-    console.error('[Cron] analytics/daily-report:', error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    });
+    return failCron(res, error, '[Cron] analytics/daily-report:');
   }
 });
 

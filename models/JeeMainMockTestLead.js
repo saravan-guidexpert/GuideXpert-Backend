@@ -24,6 +24,11 @@ const schema = new mongoose.Schema(
     currentStep: { type: Number, default: 1 },
     otpVerified: { type: Boolean, default: false },
     submittedAt: { type: Date, default: null },
+    visitorFingerprint: { type: String, trim: true, maxlength: 200 },
+    utm_source: { type: String, trim: true, maxlength: 200 },
+    utm_medium: { type: String, trim: true, maxlength: 200 },
+    utm_campaign: { type: String, trim: true, maxlength: 200 },
+    utm_content: { type: String, trim: true, maxlength: 200 },
   },
   { timestamps: true }
 );

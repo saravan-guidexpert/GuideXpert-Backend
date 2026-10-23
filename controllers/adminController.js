@@ -20,9 +20,21 @@ const TrainingFormSubmission = require('../models/TrainingFormSubmission');
 const TrainingFormResponse = require('../models/TrainingFormResponse');
 const Counsellor = require('../models/Counsellor');
 const IitCounsellingVisit = require('../models/IitCounsellingVisit');
+const JeeMainMockTestLead = require('../models/JeeMainMockTestLead');
 const IitCounsellingUtmSavedLink = require('../models/IitCounsellingUtmSavedLink');
 const OneOnOneCounselingLead = require('../models/OneOnOneCounselingLead');
 const { resolveUtmAnalyticsPageKey, isSavedLinksOnlyUtmPageKey } = require('../utils/utmAnalyticsPageKey');
+const {
+  iitCounsellingUtmNormExpr,
+  buildVisitMatch,
+  buildVisitAnalyticsPipeline,
+  buildUtmAnalyticsPipeline,
+  shapeVisitAnalytics,
+  readUtmFacet,
+  runAnalyticsAggregate,
+  analyticsFailurePayload,
+  logDbError,
+} = require('../utils/iitCounsellingVisitAnalytics');
 const { getISTCalendarDateUTC, getISTDayRangeFromString } = require('../utils/dateHelpers');
 const { ADMIN_LIST_MAX_LIMIT } = require('../constants/listPagination');
 const { ALL_SLOT_IDS } = require('../constants/slotIds');
@@ -454,30 +466,6 @@ function parseIitDateTimeFilter(query = {}) {
   };
 }
 
-/** Mongo aggregation expression: true if any standard UTM field is non-empty after trim. */
-function iitCounsellingVisitHasAnyUtmExpression() {
-  return {
-    $or: [
-      { $gt: [{ $strLenCP: { $trim: { input: { $ifNull: ['$utm_source', ''] } } } }, 0] },
-      { $gt: [{ $strLenCP: { $trim: { input: { $ifNull: ['$utm_medium', ''] } } } }, 0] },
-      { $gt: [{ $strLenCP: { $trim: { input: { $ifNull: ['$utm_campaign', ''] } } } }, 0] },
-      { $gt: [{ $strLenCP: { $trim: { input: { $ifNull: ['$utm_content', ''] } } } }, 0] },
-    ],
-  };
-}
-
-/** Normalize one UTM field to '(none)' when empty (for grouping). */
-function iitCounsellingUtmNormExpr(field) {
-  return {
-    $let: {
-      vars: { raw: { $trim: { input: { $ifNull: [`$${field}`, ''] } } } },
-      in: {
-        $cond: [{ $eq: [{ $strLenCP: '$$raw' }, 0] }, '(none)', '$$raw'],
-      },
-    },
-  };
-}
-
 function comboRowKeyFromUtmParts(source, medium, campaign, content) {
   return [source, medium, campaign, content].join('|');
 }
@@ -516,6 +504,13 @@ async function loadSavedComboKeysForTarget(linkTarget) {
       $or: [
         { linkTarget: 'oneOnOneSession' },
         { utmLink: { $regex: /^https?:\/\/[^/]+\/one-on-one-session(\/|\?|#|$)/i } },
+      ],
+    };
+  } else if (linkTarget === 'mainPage') {
+    filter = {
+      $or: [
+        { linkTarget: 'mainPage' },
+        { utmLink: { $regex: /^https?:\/\/[^/]+\/?(?:\?|#|$)/i } },
       ],
     };
   } else {
@@ -620,34 +615,70 @@ async function mergeLeadsIntoByCombo(byCombo, dateTime, { bookingConfirmedOnly =
   });
 }
 
-function buildIitUtmDimensionPipeline(match, field, labelKey, linkedIdField = 'submissionId') {
-  return [
-    { $match: match },
-    { $addFields: { _dimNorm: iitCounsellingUtmNormExpr(field) } },
+async function mergeJeeMainMockTestStatusIntoByCombo(byCombo, dateTime) {
+  const leadMatch = {
+    $or: [
+      { utm_source: { $nin: [null, ''] } },
+      { utm_medium: { $nin: [null, ''] } },
+      { utm_campaign: { $nin: [null, ''] } },
+      { utm_content: { $nin: [null, ''] } },
+    ],
+  };
+  if (dateTime.hasRange && dateTime.createdAt) {
+    leadMatch.createdAt = dateTime.createdAt;
+  }
+
+  const leadRows = await JeeMainMockTestLead.aggregate([
+    { $match: leadMatch },
+    {
+      $addFields: {
+        utm_source_n: iitCounsellingUtmNormExpr('utm_source'),
+        utm_medium_n: iitCounsellingUtmNormExpr('utm_medium'),
+        utm_campaign_n: iitCounsellingUtmNormExpr('utm_campaign'),
+        utm_content_n: iitCounsellingUtmNormExpr('utm_content'),
+      },
+    },
     {
       $group: {
-        _id: '$_dimNorm',
-        visits: { $sum: 1 },
-        uniqueVisitorSet: { $addToSet: '$visitorFingerprint' },
-        linkedSubmissions: {
-          $sum: {
-            $cond: [{ $ne: [`$${linkedIdField}`, null] }, 1, 0],
-          },
+        _id: {
+          utm_source: '$utm_source_n',
+          utm_medium: '$utm_medium_n',
+          utm_campaign: '$utm_campaign_n',
+          utm_content: '$utm_content_n',
         },
+        leadCount: { $sum: 1 },
+        completed: { $sum: { $cond: [{ $eq: ['$formCompleted', true] }, 1, 0] } },
+        inProgress: { $sum: { $cond: [{ $eq: ['$formCompleted', true] }, 0, 1] } },
       },
     },
-    { $sort: { visits: -1 } },
-    { $limit: 15 },
-    {
-      $project: {
-        _id: 0,
-        [labelKey]: '$_id',
-        visits: 1,
-        uniqueVisitors: { $size: { $ifNull: ['$uniqueVisitorSet', []] } },
-        linkedSubmissions: 1,
-      },
-    },
-  ];
+  ]);
+
+  const map = new Map();
+  for (const row of byCombo || []) {
+    map.set(
+      comboRowKeyFromUtmParts(row.utm_source, row.utm_medium, row.utm_campaign, row.utm_content),
+      { ...row, completed: 0, inProgress: 0 },
+    );
+  }
+
+  let completed = 0;
+  let inProgress = 0;
+  for (const row of leadRows) {
+    const id = row._id || {};
+    const key = comboRowKeyFromUtmParts(id.utm_source, id.utm_medium, id.utm_campaign, id.utm_content);
+    const existing = map.get(key);
+    if (!existing) continue;
+    existing.linkedSubmissions = Math.max(existing.linkedSubmissions || 0, row.leadCount || 0);
+    existing.completed = row.completed || 0;
+    existing.inProgress = row.inProgress || 0;
+    completed += row.completed || 0;
+    inProgress += row.inProgress || 0;
+  }
+
+  return {
+    rows: [...map.values()],
+    registrationStatus: { completed, inProgress },
+  };
 }
 
 exports.getIitCounsellingSubmissions = async (req, res) => {
@@ -751,115 +782,60 @@ exports.getIitCounsellingVisitAnalytics = async (req, res) => {
   try {
     const dateTime = parseIitDateTimeFilter(req.query);
     const pageKey = resolveUtmAnalyticsPageKey(req.query);
-    const match = { pageKey };
-    if (dateTime.hasRange) {
-      match.visitedAt = dateTime.visitedAt;
-    }
+    const match = buildVisitMatch(pageKey, dateTime);
+    const submissionModel = isSavedLinksOnlyUtmPageKey(pageKey)
+      ? (pageKey === 'mainPage' ? JeeMainMockTestLead : OneOnOneCounselingLead)
+      : IitCounsellingSubmission;
+    const submissionPipeline = isSavedLinksOnlyUtmPageKey(pageKey)
+      ? [
+          {
+            $match: {
+              ...(pageKey === 'guidanceBookingConfirmation' ? { bookingConfirmed: true } : {}),
+              ...(pageKey === 'mainPage'
+                ? {
+                    $or: [
+                      { utm_source: { $nin: [null, ''] } },
+                      { utm_medium: { $nin: [null, ''] } },
+                      { utm_campaign: { $nin: [null, ''] } },
+                      { utm_content: { $nin: [null, ''] } },
+                    ],
+                  }
+                : {}),
+              ...(dateTime.hasRange ? { createdAt: dateTime.createdAt } : {}),
+            },
+          },
+          { $count: 'total' },
+        ]
+      : [
+          {
+            $match: {
+              submissionType: 'iitCounselling',
+              ...(dateTime.hasRange ? { createdAt: dateTime.createdAt } : {}),
+            },
+          },
+          { $addFields: { phoneKey: { $trim: { input: { $ifNull: ['$phone', ''] } } } } },
+          { $group: { _id: '$phoneKey' } },
+          { $count: 'total' },
+        ];
 
-    const trendDateFormat = dateTime.granularity === 'hourly' ? '%Y-%m-%d %H:00' : '%Y-%m-%d';
-    const [base, trend, topReferrers, topUtmSources, topCampaigns, uniqueSubmissionsAgg] = await Promise.all([
-      IitCounsellingVisit.aggregate([
-        { $match: match },
-        {
-          $group: {
-            _id: null,
-            totalVisits: { $sum: 1 },
-            uniqueVisitors: { $addToSet: '$visitorFingerprint' },
-          },
-        },
-      ]),
-      IitCounsellingVisit.aggregate([
-        { $match: match },
-        {
-          $group: {
-            _id: {
-              $dateToString: {
-                format: trendDateFormat,
-                date: '$visitedAt',
-                timezone: 'Asia/Kolkata'
-              }
-            },
-            totalVisits: { $sum: 1 },
-            uniqueVisitorSet: { $addToSet: '$visitorFingerprint' },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ]),
-      IitCounsellingVisit.aggregate([
-        { $match: { ...match, referrer: { $exists: true, $nin: ['', null] } } },
-        { $group: { _id: '$referrer', visits: { $sum: 1 } } },
-        { $sort: { visits: -1 } },
-        { $limit: 500 },
-      ]),
-      IitCounsellingVisit.aggregate([
-        { $match: { ...match, utm_source: { $exists: true, $nin: ['', null] } } },
-        { $group: { _id: '$utm_source', visits: { $sum: 1 } } },
-        { $sort: { visits: -1 } },
-        { $limit: 500 },
-      ]),
-      IitCounsellingVisit.aggregate([
-        { $match: { ...match, utm_campaign: { $exists: true, $nin: ['', null] } } },
-        { $group: { _id: '$utm_campaign', visits: { $sum: 1 } } },
-        { $sort: { visits: -1 } },
-        { $limit: 500 },
-      ]),
-      isSavedLinksOnlyUtmPageKey(pageKey)
-        ? OneOnOneCounselingLead.aggregate([
-            {
-              $match: {
-                ...(pageKey === 'guidanceBookingConfirmation' ? { bookingConfirmed: true } : {}),
-                ...(dateTime.hasRange ? { createdAt: dateTime.createdAt } : {}),
-              },
-            },
-            { $count: 'total' },
-          ])
-        : IitCounsellingSubmission.aggregate([
-            {
-              $match: {
-                submissionType: 'iitCounselling',
-                ...(dateTime.hasRange ? { createdAt: dateTime.createdAt } : {}),
-              },
-            },
-            { $addFields: { phoneKey: { $trim: { input: { $ifNull: ['$phone', ''] } } } } },
-            { $group: { _id: '$phoneKey' } },
-            { $count: 'total' },
-          ]),
+    const [facetRows, uniqueSubmissionsAgg] = await Promise.all([
+      runAnalyticsAggregate(
+        IitCounsellingVisit,
+        buildVisitAnalyticsPipeline(match, dateTime.granularity),
+        'iitVisitAnalytics'
+      ),
+      runAnalyticsAggregate(submissionModel, submissionPipeline, 'iitVisitAnalyticsSubmissions'),
     ]);
 
-    const totals = base[0] || { totalVisits: 0, uniqueVisitors: [] };
-    const totalVisits = totals.totalVisits || 0;
-    const uniqueVisitors = Array.isArray(totals.uniqueVisitors) ? totals.uniqueVisitors.length : 0;
     const totalSubmissions = uniqueSubmissionsAgg?.[0]?.total ?? 0;
-
     return res.status(200).json({
       success: true,
-      data: {
-        totalVisits,
-        uniqueVisitors,
-        totalSubmissions,
-        conversionRate: totalVisits > 0 ? Number(((totalSubmissions / totalVisits) * 100).toFixed(2)) : 0,
-        granularity: dateTime.granularity,
-        trend: trend.map((row) => ({
-          bucket: row._id,
-          totalVisits: row.totalVisits,
-          uniqueVisitors: Array.isArray(row.uniqueVisitorSet) ? row.uniqueVisitorSet.length : 0,
-        })),
-        filters: {
-          fromDate: dateTime.fromDate,
-          toDate: dateTime.toDate,
-          fromTime: dateTime.fromTime,
-          toTime: dateTime.toTime,
-          granularity: dateTime.granularity,
-          linkTarget: pageKey,
-        },
-        topReferrers: topReferrers.map((row) => ({ referrer: row._id, visits: row.visits })),
-        topUtmSources: topUtmSources.map((row) => ({ source: row._id, visits: row.visits })),
-        topCampaigns: topCampaigns.map((row) => ({ campaign: row._id, visits: row.visits })),
-      },
+      data: shapeVisitAnalytics(facetRows?.[0], { dateTime, pageKey, totalSubmissions }),
     });
   } catch (error) {
-    console.error('[getIitCounsellingVisitAnalytics] Error:', error);
-    return res.status(500).json({ success: false, message: 'Something went wrong.' });
+    logDbError('[getIitCounsellingVisitAnalytics]', error);
+    const failure = analyticsFailurePayload(error);
+    return res.status(failure.status).json(failure.body);
   }
 };
 
@@ -867,134 +843,37 @@ exports.getIitCounsellingUtmAnalytics = async (req, res) => {
   try {
     const dateTime = parseIitDateTimeFilter(req.query);
     const pageKey = resolveUtmAnalyticsPageKey(req.query);
-    const match = { pageKey };
-    const linkedIdField = isSavedLinksOnlyUtmPageKey(pageKey) ? 'oneOnOneCounselingLeadId' : 'submissionId';
-    if (dateTime.hasRange) {
-      match.visitedAt = dateTime.visitedAt;
-    }
+    const linkedIdField = pageKey === 'mainPage'
+      ? 'jeeMainMockTestLeadId'
+      : isSavedLinksOnlyUtmPageKey(pageKey)
+        ? 'oneOnOneCounselingLeadId'
+        : 'submissionId';
+    const match = buildVisitMatch(pageKey, dateTime);
+    const facetRows = await runAnalyticsAggregate(
+      IitCounsellingVisit,
+      buildUtmAnalyticsPipeline(match, linkedIdField),
+      'iitUtmAnalytics'
+    );
+    const facet = readUtmFacet(facetRows?.[0]);
+    const summary = facet.summary;
 
-    const hasAny = iitCounsellingVisitHasAnyUtmExpression();
-
-    const [
-      summaryRows,
-      bySource,
-      byMedium,
-      byCampaign,
-      byContent,
-      byCombo,
-    ] = await Promise.all([
-      IitCounsellingVisit.aggregate([
-        { $match: match },
-        {
-          $group: {
-            _id: null,
-            totalVisits: { $sum: 1 },
-            visitsWithAnyUtm: { $sum: { $cond: [hasAny, 1, 0] } },
-            uniqueFingerprints: { $addToSet: '$visitorFingerprint' },
-            uniqueFpWithUtm: {
-              $addToSet: {
-                $cond: {
-                  if: hasAny,
-                  then: '$visitorFingerprint',
-                  else: '$$REMOVE',
-                },
-              },
-            },
-            uniqueFpWithoutUtm: {
-              $addToSet: {
-                $cond: {
-                  if: { $not: [hasAny] },
-                  then: '$visitorFingerprint',
-                  else: '$$REMOVE',
-                },
-              },
-            },
-          },
-        },
-        {
-          $project: {
-            _id: 0,
-            totalVisits: 1,
-            visitsWithAnyUtm: 1,
-            visitsWithoutUtm: { $subtract: ['$totalVisits', '$visitsWithAnyUtm'] },
-            uniqueVisitors: { $size: { $ifNull: ['$uniqueFingerprints', []] } },
-            uniqueVisitorsWithUtm: { $size: { $ifNull: ['$uniqueFpWithUtm', []] } },
-            uniqueVisitorsWithoutUtm: { $size: { $ifNull: ['$uniqueFpWithoutUtm', []] } },
-          },
-        },
-      ]),
-      IitCounsellingVisit.aggregate(buildIitUtmDimensionPipeline(match, 'utm_source', 'utm_source', linkedIdField)),
-      IitCounsellingVisit.aggregate(buildIitUtmDimensionPipeline(match, 'utm_medium', 'utm_medium', linkedIdField)),
-      IitCounsellingVisit.aggregate(buildIitUtmDimensionPipeline(match, 'utm_campaign', 'utm_campaign', linkedIdField)),
-      IitCounsellingVisit.aggregate(buildIitUtmDimensionPipeline(match, 'utm_content', 'utm_content', linkedIdField)),
-      IitCounsellingVisit.aggregate([
-        { $match: match },
-        {
-          $addFields: {
-            utm_source_n: iitCounsellingUtmNormExpr('utm_source'),
-            utm_medium_n: iitCounsellingUtmNormExpr('utm_medium'),
-            utm_campaign_n: iitCounsellingUtmNormExpr('utm_campaign'),
-            utm_content_n: iitCounsellingUtmNormExpr('utm_content'),
-          },
-        },
-        {
-          $group: {
-            _id: {
-              utm_source: '$utm_source_n',
-              utm_medium: '$utm_medium_n',
-              utm_campaign: '$utm_campaign_n',
-              utm_content: '$utm_content_n',
-            },
-            visits: { $sum: 1 },
-            uniqueVisitorSet: { $addToSet: '$visitorFingerprint' },
-            linkedSubmissions: {
-              $sum: {
-                $cond: [{ $ne: [`$${linkedIdField}`, null] }, 1, 0],
-              },
-            },
-            firstVisitAt: { $min: '$visitedAt' },
-            latestVisitAt: { $max: '$visitedAt' },
-          },
-        },
-        { $sort: { latestVisitAt: -1 } },
-        { $limit: 500 },
-        {
-          $project: {
-            _id: 0,
-            utm_source: '$_id.utm_source',
-            utm_medium: '$_id.utm_medium',
-            utm_campaign: '$_id.utm_campaign',
-            utm_content: '$_id.utm_content',
-            visits: 1,
-            uniqueVisitors: { $size: { $ifNull: ['$uniqueVisitorSet', []] } },
-            linkedSubmissions: 1,
-            firstVisitAt: 1,
-            latestVisitAt: 1,
-          },
-        },
-      ]),
-    ]);
-
-    const summary = summaryRows[0] || {
-      totalVisits: 0,
-      visitsWithAnyUtm: 0,
-      visitsWithoutUtm: 0,
-      uniqueVisitors: 0,
-      uniqueVisitorsWithUtm: 0,
-      uniqueVisitorsWithoutUtm: 0,
-    };
-
-    let comboRows = byCombo;
+    let comboRows = facet.byCombo;
+    let registrationStatus = null;
     if (isSavedLinksOnlyUtmPageKey(pageKey)) {
       const savedKeys = await loadSavedComboKeysForTarget(pageKey);
-      comboRows = filterByComboToSavedKeys(byCombo, savedKeys);
+      comboRows = filterByComboToSavedKeys(facet.byCombo, savedKeys);
     }
 
-    const comboForResponse = isSavedLinksOnlyUtmPageKey(pageKey)
-      ? await mergeLeadsIntoByCombo(comboRows, dateTime, {
-          bookingConfirmedOnly: pageKey === 'guidanceBookingConfirmation',
-        })
-      : byCombo;
+    let comboForResponse = facet.byCombo;
+    if (pageKey === 'mainPage') {
+      const merged = await mergeJeeMainMockTestStatusIntoByCombo(comboRows, dateTime);
+      comboForResponse = merged.rows;
+      registrationStatus = merged.registrationStatus;
+    } else if (isSavedLinksOnlyUtmPageKey(pageKey)) {
+      comboForResponse = await mergeLeadsIntoByCombo(comboRows, dateTime, {
+        bookingConfirmedOnly: pageKey === 'guidanceBookingConfirmation',
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -1006,11 +885,12 @@ exports.getIitCounsellingUtmAnalytics = async (req, res) => {
           uniqueVisitors: summary.uniqueVisitors || 0,
           uniqueVisitorsWithUtm: summary.uniqueVisitorsWithUtm || 0,
           uniqueVisitorsWithoutUtm: summary.uniqueVisitorsWithoutUtm || 0,
+          ...(registrationStatus ? { registrationStatus } : {}),
         },
-        bySource,
-        byMedium,
-        byCampaign,
-        byContent,
+        bySource: facet.bySource,
+        byMedium: facet.byMedium,
+        byCampaign: facet.byCampaign,
+        byContent: facet.byContent,
         byCombo: comboForResponse,
         filters: {
           fromDate: dateTime.fromDate,
@@ -1022,8 +902,9 @@ exports.getIitCounsellingUtmAnalytics = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('[getIitCounsellingUtmAnalytics] Error:', error);
-    return res.status(500).json({ success: false, message: 'Something went wrong.' });
+    logDbError('[getIitCounsellingUtmAnalytics]', error);
+    const failure = analyticsFailurePayload(error);
+    return res.status(failure.status).json(failure.body);
   }
 };
 

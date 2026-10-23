@@ -5,6 +5,7 @@ const { ADMIN_LIST_MAX_LIMIT } = require('../constants/listPagination');
 const otpRepository = require('../utils/otpRepository');
 const otpStore = require('../utils/otpStore');
 const VerifiedPhoneSession = require('../models/VerifiedPhoneSession');
+const IitCounsellingVisit = require('../models/IitCounsellingVisit');
 
 const INDIAN_MOBILE_REGEX = /^[6-9]\d{9}$/;
 const VERIFIED_TTL_MS = 15 * 60 * 1000;
@@ -97,6 +98,48 @@ function buildSearchQuery(q) {
   return { $or: clauses };
 }
 
+function optionalUtm(body) {
+  const fields = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content'];
+  const out = {};
+  for (const field of fields) {
+    const value = typeof body?.[field] === 'string' ? body[field].trim().slice(0, 200) : '';
+    if (value) out[field] = value;
+  }
+  const visitorFingerprint = typeof body?.visitorFingerprint === 'string' ? body.visitorFingerprint.trim().slice(0, 200) : '';
+  if (visitorFingerprint) out.visitorFingerprint = visitorFingerprint;
+  return out;
+}
+
+async function linkJeeLeadToMainPageVisit(doc, attribution) {
+  try {
+    const visitorFingerprint = attribution.visitorFingerprint || '';
+    if (visitorFingerprint) {
+      await IitCounsellingVisit.findOneAndUpdate(
+        { visitorFingerprint, pageKey: 'mainPage', jeeMainMockTestLeadId: null },
+        { $set: { jeeMainMockTestLeadId: doc._id } },
+        { sort: { visitedAt: -1 } }
+      );
+      return;
+    }
+    if (!attribution.utm_content) return;
+    const visitMatch = {
+      pageKey: 'mainPage',
+      jeeMainMockTestLeadId: null,
+      utm_content: attribution.utm_content,
+    };
+    if (attribution.utm_campaign) visitMatch.utm_campaign = attribution.utm_campaign;
+    if (attribution.utm_source) visitMatch.utm_source = attribution.utm_source;
+    if (attribution.utm_medium) visitMatch.utm_medium = attribution.utm_medium;
+    await IitCounsellingVisit.findOneAndUpdate(
+      visitMatch,
+      { $set: { jeeMainMockTestLeadId: doc._id } },
+      { sort: { visitedAt: -1 } }
+    );
+  } catch (err) {
+    console.error('[linkJeeLeadToMainPageVisit]', err);
+  }
+}
+
 function parseLeadId(body) {
   const leadId = typeof body?.leadId === 'string' ? body.leadId.trim() : '';
   if (!leadId || !mongoose.Types.ObjectId.isValid(leadId)) {
@@ -124,6 +167,7 @@ exports.saveJeeMainMockTestSection1 = async (req, res) => {
       });
     }
 
+    const attribution = optionalUtm(body);
     const doc = await JeeMainMockTestLead.findOneAndUpdate(
       { mobileNumber: mobile.digits, formCompleted: { $ne: true } },
       {
@@ -133,10 +177,12 @@ exports.saveJeeMainMockTestSection1 = async (req, res) => {
           otpVerified: true,
           currentStep: 1,
           formCompleted: false,
+          ...attribution,
         },
       },
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
     );
+    await linkJeeLeadToMainPageVisit(doc, attribution);
 
     return res.status(200).json({
       success: true,

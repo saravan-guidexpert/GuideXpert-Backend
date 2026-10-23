@@ -6,6 +6,7 @@ const DEFAULT_IIT_PAGE = 'https://guidexpert.co.in/iit-counselling';
 const DEFAULT_ONE_ON_ONE_SESSION_PAGE_URL = 'https://www.guidexpert.co.in/one-on-one-session';
 const DEFAULT_GUIDANCE_BOOKING_CONFIRMATION_PAGE_URL =
   'https://www.guidexpert.co.in/guidance-booking-confirmation';
+const DEFAULT_MAIN_PAGE_URL = 'https://guidexpert.co.in';
 const PLATFORM_TO_SOURCE = {
   Instagram: 'instagram',
   YouTube: 'youtube',
@@ -64,6 +65,14 @@ function buildGuidanceBookingConfirmationUtmUrl(influencerName, platform, campai
   );
 }
 
+function getMainPageBaseUrl() {
+  return normalizeBaseUrl(process.env.MAIN_PAGE_URL, DEFAULT_MAIN_PAGE_URL);
+}
+
+function buildMainPageUtmUrl(influencerName, platform, campaign) {
+  return buildUtmUrlOnBase(getMainPageBaseUrl(), influencerName, platform, campaign);
+}
+
 function normalizeLinkTarget(value) {
   if (value == null || value === '') return 'iitCounselling';
   const s = String(value).trim().toLowerCase().replace(/-/g, '_');
@@ -71,13 +80,19 @@ function normalizeLinkTarget(value) {
   if (s === 'guidancebookingconfirmation' || s === 'guidance_booking_confirmation') {
     return 'guidanceBookingConfirmation';
   }
+  if (
+    s === 'mainpage' || s === 'main_page' || s === 'home'
+    || s === 'jeemocktest' || s === 'jee_mock_test'
+  ) return 'mainPage';
   return 'iitCounselling';
 }
 
 function resolveDocLinkTarget(doc) {
+  if (doc.linkTarget === 'mainPage') return 'mainPage';
   if (doc.linkTarget === 'guidanceBookingConfirmation') return 'guidanceBookingConfirmation';
   if (doc.linkTarget === 'oneOnOneSession') return 'oneOnOneSession';
   const url = doc.utmLink || '';
+  if (/^https?:\/\/[^/]+\/?(?:\?|#|$)/i.test(url)) return 'mainPage';
   if (/^https?:\/\/[^/]+\/guidance-booking-confirmation(\/|\?|#|$)/i.test(url)) {
     return 'guidanceBookingConfirmation';
   }
@@ -107,6 +122,14 @@ function mapDoc(doc) {
 }
 
 function buildListFilter(linkTargetParam) {
+  if (linkTargetParam === 'mainPage') {
+    return {
+      $or: [
+        { linkTarget: 'mainPage' },
+        { utmLink: { $regex: /^https?:\/\/[^/]+\/?(?:\?|#|$)/i } },
+      ],
+    };
+  }
   if (linkTargetParam === 'guidanceBookingConfirmation') {
     return {
       $or: [
@@ -174,7 +197,9 @@ exports.createIitCounsellingSavedUtmLink = async (req, res) => {
       ? buildOneOnOneSessionUtmUrl(influencerName.trim(), platformVal, campaignVal)
       : linkTarget === 'guidanceBookingConfirmation'
         ? buildGuidanceBookingConfirmationUtmUrl(influencerName.trim(), platformVal, campaignVal)
-        : buildIitCounsellingUtmUrl(influencerName.trim(), platformVal, campaignVal);
+        : linkTarget === 'mainPage'
+          ? buildMainPageUtmUrl(influencerName.trim(), platformVal, campaignVal)
+          : buildIitCounsellingUtmUrl(influencerName.trim(), platformVal, campaignVal);
     const payload = {
       influencerName: influencerName.trim(),
       platform: platformVal,

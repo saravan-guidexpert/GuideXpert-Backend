@@ -1,4 +1,4 @@
-const SAVED_LINKS_ONLY_PAGE_KEYS = new Set(['oneOnOneSession', 'guidanceBookingConfirmation']);
+const SAVED_LINKS_ONLY_PAGE_KEYS = new Set(['oneOnOneSession', 'guidanceBookingConfirmation', 'mainPage']);
 
 /** Maps admin ?linkTarget= to IitCounsellingVisit.pageKey. */
 function resolveUtmAnalyticsPageKey(query = {}) {
@@ -8,6 +8,10 @@ function resolveUtmAnalyticsPageKey(query = {}) {
   if (s === 'guidancebookingconfirmation' || s === 'guidance_booking_confirmation') {
     return 'guidanceBookingConfirmation';
   }
+  if (
+    s === 'mainpage' || s === 'main_page' || s === 'home'
+    || s === 'jeemocktest' || s === 'jee_mock_test'
+  ) return 'mainPage';
   return 'iitCounselling';
 }
 

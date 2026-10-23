@@ -33,7 +33,7 @@ const iitCounsellingUtmSavedLinkSchema = new mongoose.Schema({
   linkTarget: {
     type: String,
     trim: true,
-    enum: ['iitCounselling', 'oneOnOneSession', 'guidanceBookingConfirmation'],
+    enum: ['iitCounselling', 'oneOnOneSession', 'guidanceBookingConfirmation', 'mainPage'],
     default: 'iitCounselling',
   },
   cost: {
