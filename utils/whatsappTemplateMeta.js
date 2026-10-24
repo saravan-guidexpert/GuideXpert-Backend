@@ -10,6 +10,7 @@ const MESSAGE_KIND_TO_ENV_KEY = {
   guidance_booking_submit: 'GUPSHUP_TEMPLATE_GUIDANCE_BOOKING_CONFIRM',
   guidance_pre30min: 'GUPSHUP_TEMPLATE_GUIDANCE_PRE30MIN_REMINDER',
   guidance_counsellor_booking_notify: 'GUPSHUP_TEMPLATE_GUIDANCE_COUNSELLOR_BOOKING_NOTIFY',
+  jee_mock_test_submit: 'GUPSHUP_TEMPLATE_JEE_MOCK_TEST_INFLUENCER',
 };
 
 function getTemplateMetaForKind(messageKind) {
