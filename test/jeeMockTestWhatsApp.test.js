@@ -9,6 +9,7 @@ const {
   buildJeeMockTestSubmitVars,
   JEE_MOCK_TEST_HEADER_IMAGE_URL,
   JEE_MOCK_TEST_INFLUENCER_TEMPLATE_ID,
+  JEE_MOCK_TEST_DIRECT_TEMPLATE_ID,
   JEE_MOCK_TEST_MESSAGE_KIND,
   JEE_MOCK_TEST_UTM_TEMPLATES,
 } = require('../utils/jeeMockTestWhatsApp');
@@ -19,14 +20,38 @@ const WhatsAppRetryGroup = require('../models/WhatsAppRetryGroup');
 const WhatsAppMessageEvent = require('../models/WhatsAppMessageEvent');
 
 describe('jee mock test UTM templates', () => {
-  test('listed influencer links share the approved Gupshup template', () => {
-    assert.equal(JEE_MOCK_TEST_UTM_TEMPLATES.length, 6);
+  test('listed influencer links use the template for that link', () => {
+    assert.equal(JEE_MOCK_TEST_UTM_TEMPLATES.length, 8);
+    const directContents = new Set(['referp', 'pro']);
     for (const row of JEE_MOCK_TEST_UTM_TEMPLATES) {
       const match = resolveJeeMockTestTemplate(row);
       assert.ok(match);
-      assert.equal(match.templateId, JEE_MOCK_TEST_INFLUENCER_TEMPLATE_ID);
       assert.equal(match.messageKind, JEE_MOCK_TEST_MESSAGE_KIND);
+      const expected = directContents.has(String(row.utm_content).toLowerCase())
+        ? JEE_MOCK_TEST_DIRECT_TEMPLATE_ID
+        : JEE_MOCK_TEST_INFLUENCER_TEMPLATE_ID;
+      assert.equal(match.templateId, expected);
     }
+  });
+
+  test('referp, PRO, and a direct visit use the direct template', () => {
+    const referp = resolveJeeMockTestTemplate({
+      utm_source: 'instagram',
+      utm_medium: 'influencer',
+      utm_campaign: 'guide_xperts',
+      utm_content: 'referp',
+    });
+    const pro = resolveJeeMockTestTemplate({
+      utm_source: 'WhatsApp',
+      utm_medium: 'influencer',
+      utm_campaign: 'guide_xperts',
+      utm_content: 'PRO',
+    });
+    const direct = resolveJeeMockTestTemplate({});
+    assert.equal(referp?.templateId, JEE_MOCK_TEST_DIRECT_TEMPLATE_ID);
+    assert.equal(pro?.templateId, '75c795a8-56fe-467d-a353-f9dc9cc529f5');
+    assert.equal(direct?.templateId, JEE_MOCK_TEST_DIRECT_TEMPLATE_ID);
+    assert.equal(resolveJeeMockTestTemplate(null), null);
   });
 
   test('matches case-insensitively and ignores unrelated UTMs', () => {
