@@ -1,19 +1,10 @@
 const mongoose = require('mongoose');
 const MockTestLead = require('../models/MockTestLead');
-const WhatsAppRetryGroup = require('../models/WhatsAppRetryGroup');
 const { ADMIN_LIST_MAX_LIMIT } = require('../constants/listPagination');
 const otpRepository = require('../utils/otpRepository');
 const otpStore = require('../utils/otpStore');
 const VerifiedPhoneSession = require('../models/VerifiedPhoneSession');
-const { isGupshupConfigured, sendJeeMockTestSubmitWhatsApp, isIntegrationStub } = require('../services/gupshupService');
-const { safeSendWhatsApp } = require('../utils/safeSendWhatsApp');
-const {
-  resolveJeeMockTestTemplate,
-  buildJeeMockTestSubmitVars,
-  resolveJeeMockTestHeaderImageUrl,
-  ensureJeeMockTestTemplateEnv,
-  JEE_MOCK_TEST_OPS_PRODUCT,
-} = require('../utils/jeeMockTestWhatsApp');
+const { dispatchJeeMockTestWhatsApp } = require('../services/jeeMockTestWhatsAppDispatch');
 
 const INDIAN_MOBILE_REGEX = /^[6-9]\d{9}$/;
 const VERIFIED_TTL_MS = 15 * 60 * 1000;
@@ -83,61 +74,6 @@ function utmSetFromBody(body) {
     if (typeof raw === 'string' && raw.trim()) set[key] = raw.trim().slice(0, 200);
   }
   return set;
-}
-
-async function dispatchJeeMockTestWhatsApp(doc) {
-  const template = resolveJeeMockTestTemplate(doc);
-  if (!template) return { attempted: false, skippedReason: 'utm_not_mapped' };
-  if (!isGupshupConfigured()) return { attempted: false, skippedReason: 'gupshup_not_configured' };
-
-  const headerImageLink = resolveJeeMockTestHeaderImageUrl();
-  if (!headerImageLink && !isIntegrationStub()) {
-    console.warn(
-      '[mockTest] WhatsApp skipped: header image URL is missing'
-    );
-    return { attempted: false, skippedReason: 'header_image_missing' };
-  }
-
-  const phone10 = doc.whatsappNumber || doc.contactNumber;
-  try {
-    const templateEnvKey = ensureJeeMockTestTemplateEnv(template);
-    const submitGroup = await WhatsAppRetryGroup.create({
-      messageKind: template.messageKind,
-      cronRunId: null,
-      trigger: template.messageKind,
-      status: 'open',
-    });
-    const waResult = await safeSendWhatsApp({
-      phone10,
-      formSubmissionId: null,
-      vars: buildJeeMockTestSubmitVars(doc),
-      retryKind: template.messageKind,
-      source: template.messageKind,
-      cronRunId: null,
-      cronJobKey: null,
-      sendFn: (phone, vars, sendOpts) =>
-        sendJeeMockTestSubmitWhatsApp(phone, vars, {
-          ...sendOpts,
-          templateId: template.templateId,
-          templateEnvKey,
-        }),
-      retryGroupId: submitGroup._id,
-      attemptNumber: 1,
-      opsProduct: JEE_MOCK_TEST_OPS_PRODUCT,
-      mockTestLeadId: doc._id,
-      explicitTemplateEnvKey: templateEnvKey,
-    });
-    if (waResult && waResult.success) {
-      return { attempted: true, success: true, ...(waResult.idempotent ? { idempotent: true } : {}) };
-    }
-    const errText = waResult && waResult.error ? String(waResult.error).slice(0, 240) : 'send_failed';
-    console.warn('[mockTest] WhatsApp jee_mock_test_submit unsuccessful:', errText);
-    return { attempted: true, success: false, error: errText };
-  } catch (waErr) {
-    const msg = String(waErr?.message || waErr || 'exception').slice(0, 240);
-    console.error('[mockTest] WhatsApp dispatch error:', msg);
-    return { attempted: true, success: false, error: msg };
-  }
 }
 
 function parseLeadId(body) {
