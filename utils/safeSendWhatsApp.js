@@ -81,6 +81,8 @@ function mapSourceToGroupTrigger(source) {
       return 'guidance_booking_submit';
     case 'guidance_counsellor_booking_notify':
       return 'guidance_counsellor_booking_notify';
+    case 'jee_mock_test_submit':
+      return 'jee_mock_test_submit';
     default:
       return 'manual';
   }
@@ -137,6 +139,7 @@ function buildMessageEventPayload({
   cohortSlotInstantUtc,
   iitCounsellingSubmissionId,
   oneOnOneCounselingLeadId,
+  mockTestLeadId,
   eligibilityTiming
 }) {
   return {
@@ -144,6 +147,7 @@ function buildMessageEventPayload({
     formSubmissionId: subId,
     iitCounsellingSubmissionId: iitCounsellingSubmissionId || null,
     oneOnOneCounselingLeadId: oneOnOneCounselingLeadId || null,
+    mockTestLeadId: mockTestLeadId || null,
     cohortSlotInstantUtc: cohortSlotInstantUtc || null,
     opsProduct: opsProduct || 'guidexpert',
     messageKind: retryKind,
@@ -244,6 +248,7 @@ async function safeSendWhatsApp({
   cohortSlotInstantUtc,
   iitCounsellingSubmissionId,
   oneOnOneCounselingLeadId,
+  mockTestLeadId,
   explicitTemplateEnvKey,
   now: nowOpt
 }) {
@@ -266,6 +271,7 @@ async function safeSendWhatsApp({
   const canonicalOid = toOidMaybe(canonicalRetryGroupIdOpt);
   const iitSubOid = toOidMaybe(iitCounsellingSubmissionId);
   const oneOnOneLeadOid = toOidMaybe(oneOnOneCounselingLeadId);
+  const mockTestLeadOid = toOidMaybe(mockTestLeadId);
   const cohortSlotUtc =
     cohortSlotInstantUtc instanceof Date && !Number.isNaN(cohortSlotInstantUtc.getTime())
       ? cohortSlotInstantUtc
@@ -359,6 +365,7 @@ async function safeSendWhatsApp({
       cohortSlotInstantUtc: cohortSlotUtc,
       iitCounsellingSubmissionId: iitSubOid,
       oneOnOneCounselingLeadId: oneOnOneLeadOid,
+      mockTestLeadId: mockTestLeadOid,
       now: nowBase
     });
 
@@ -522,6 +529,7 @@ async function safeSendWhatsApp({
         cohortSlotInstantUtc: cohortSlotUtc,
         iitCounsellingSubmissionId: iitSubOid,
         oneOnOneCounselingLeadId: oneOnOneLeadOid,
+        mockTestLeadId: mockTestLeadOid,
         eligibilityTiming: eligibilityTimingPayload
       });
       if (sendOutcome.useAwaitingReconcile) {
@@ -642,6 +650,7 @@ async function safeSendWhatsApp({
           cohortSlotInstantUtc: cohortSlotUtc,
           iitCounsellingSubmissionId: iitSubOid,
           oneOnOneCounselingLeadId: oneOnOneLeadOid,
+          mockTestLeadId: mockTestLeadOid,
           eligibilityTiming: failEligibilityTiming
         }),
         reservedEventId
@@ -710,6 +719,7 @@ async function safeSendWhatsApp({
           cohortSlotInstantUtc: cohortSlotUtc,
           iitCounsellingSubmissionId: iitSubOid,
           oneOnOneCounselingLeadId: oneOnOneLeadOid,
+          mockTestLeadId: mockTestLeadOid,
           eligibilityTiming: null
         });
         Object.assign(ambiguousPayload, buildAwaitingReconcileFields(now));
@@ -826,6 +836,7 @@ async function safeSendWhatsApp({
           cohortSlotInstantUtc: cohortSlotUtc,
           iitCounsellingSubmissionId: iitSubOid,
           oneOnOneCounselingLeadId: oneOnOneLeadOid,
+          mockTestLeadId: mockTestLeadOid,
           eligibilityTiming: catchEligibilityTiming
         }),
         reservedEventId

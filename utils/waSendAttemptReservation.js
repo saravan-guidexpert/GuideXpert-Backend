@@ -45,7 +45,8 @@ async function reserveOutboundWhatsAppAttempt(p) {
     opsProduct,
     cohortSlotInstantUtc,
     iitCounsellingSubmissionId,
-    oneOnOneCounselingLeadId
+    oneOnOneCounselingLeadId,
+    mockTestLeadId
   } = p;
 
   const gid = toOid(retryGroupId);
@@ -82,6 +83,10 @@ async function reserveOutboundWhatsAppAttempt(p) {
     oneOnOneCounselingLeadId && mongoose.Types.ObjectId.isValid(String(oneOnOneCounselingLeadId))
       ? new mongoose.Types.ObjectId(String(oneOnOneCounselingLeadId))
       : null;
+  const mockTestLeadOid =
+    mockTestLeadId && mongoose.Types.ObjectId.isValid(String(mockTestLeadId))
+      ? new mongoose.Types.ObjectId(String(mockTestLeadId))
+      : null;
   const slotUtc =
     cohortSlotInstantUtc instanceof Date && !Number.isNaN(cohortSlotInstantUtc.getTime())
       ? cohortSlotInstantUtc
@@ -100,6 +105,7 @@ async function reserveOutboundWhatsAppAttempt(p) {
     formSubmissionId: subOid,
     iitCounsellingSubmissionId: iitSubOid,
     oneOnOneCounselingLeadId: oneOnOneLeadOid,
+    mockTestLeadId: mockTestLeadOid,
     cohortSlotInstantUtc: slotUtc,
     opsProduct: normalizeOutboundOpsProduct(opsProduct),
     parentMessageEventId: parentOid,

@@ -22,6 +22,7 @@ const WhatsAppRetryGroup = require('../models/WhatsAppRetryGroup');
 const FormSubmission = require('../models/FormSubmission');
 const IitCounsellingSubmission = require('../models/IitCounsellingSubmission');
 const OneOnOneCounselingLead = require('../models/OneOnOneCounselingLead');
+const MockTestLead = require('../models/MockTestLead');
 const GuidanceSlot = require('../models/GuidanceSlot');
 const gupshupService = require('./gupshupService');
 const { sendIitReminderWhatsApp } = require('./gupshupService');
@@ -43,6 +44,12 @@ const {
   parseGuidanceSlotInstantUtc,
   GUPSHUP_TEMPLATE_GUIDANCE_BOOKING_CONFIRM,
 } = require('../utils/guidanceBookingWhatsApp');
+const {
+  buildJeeMockTestSubmitVars,
+  ensureJeeMockTestTemplateEnv,
+  resolveJeeMockTestTemplate,
+  GUPSHUP_TEMPLATE_JEE_MOCK_TEST_INFLUENCER,
+} = require('../utils/jeeMockTestWhatsApp');
 const {
   buildOpsScopedEventMatch,
   validateMessageKindForOpsProduct,
@@ -95,6 +102,8 @@ function dispatchKindToSendFn(kind) {
       return gupshupService.sendOneOnOneSubmitWhatsApp;
     case 'guidance_booking_submit':
       return gupshupService.sendGuidanceBookingSubmitWhatsApp;
+    case 'jee_mock_test_submit':
+      return gupshupService.sendJeeMockTestSubmitWhatsApp;
     default:
       return null;
   }
@@ -106,6 +115,8 @@ async function resolveRecipientForRecovery({ phone, messageKind, opsProduct, lin
     slug === 'one_on_one_counseling' && messageKind === 'one_on_one_submit';
   const useGuidanceBooking =
     slug === 'guidance_booking' && messageKind === 'guidance_booking_submit';
+  const useJeeMockTest =
+    slug === 'jee_mock_test' && messageKind === 'jee_mock_test_submit';
   const useIit =
     slug === 'iit_counselling' &&
     (isIitReminderMessageKind(messageKind) || messageKind === 'slot_booked');
@@ -152,6 +163,30 @@ async function resolveRecipientForRecovery({ phone, messageKind, opsProduct, lin
       oneOnOneLead: lead,
       guidanceSlot: slot,
       opsProduct: 'guidance_booking',
+    };
+  }
+
+  if (useJeeMockTest) {
+    let lead = null;
+    if (lineage?.mockTestLeadId && mongoose.Types.ObjectId.isValid(String(lineage.mockTestLeadId))) {
+      lead = await MockTestLead.findById(lineage.mockTestLeadId).lean();
+    }
+    if (!lead) {
+      lead = await MockTestLead.findOne({
+        formCompleted: true,
+        $or: [{ whatsappNumber: phone }, { contactNumber: phone }],
+      })
+        .sort({ submittedAt: -1 })
+        .lean();
+    }
+    if (!lead) return { error: 'missing_mock_test_lead' };
+    return {
+      iitSub: null,
+      formSub: null,
+      oneOnOneLead: null,
+      guidanceSlot: null,
+      mockTestLead: lead,
+      opsProduct: 'jee_mock_test',
     };
   }
 
@@ -798,6 +833,26 @@ async function executeJob(jobId) {
           cohortSlotInstantUtc: parsePreferredSlotInstantUtc(lead),
           oneOnOneCounselingLeadId: lead._id,
           explicitTemplateEnvKey: GUPSHUP_TEMPLATE_ONE_ON_ONE_CONFIRM,
+        });
+      } else if (resolved.opsProduct === 'jee_mock_test' && job.messageKind === 'jee_mock_test_submit') {
+        const lead = resolved.mockTestLead;
+        const template = resolveJeeMockTestTemplate(lead);
+        const templateEnvKey = template
+          ? ensureJeeMockTestTemplateEnv(template)
+          : GUPSHUP_TEMPLATE_JEE_MOCK_TEST_INFLUENCER;
+        r = await safeSendWhatsApp({
+          ...sendBase,
+          formSubmissionId: null,
+          vars: buildJeeMockTestSubmitVars(lead),
+          opsProduct: 'jee_mock_test',
+          mockTestLeadId: lead._id,
+          explicitTemplateEnvKey: templateEnvKey,
+          sendFn: (phone, sendVars, sendOpts) =>
+            gupshupService.sendJeeMockTestSubmitWhatsApp(phone, sendVars, {
+              ...sendOpts,
+              templateId: template?.templateId,
+              templateEnvKey,
+            }),
         });
       } else if (resolved.opsProduct === 'guidance_booking' && job.messageKind === 'guidance_booking_submit') {
         const lead = resolved.oneOnOneLead;

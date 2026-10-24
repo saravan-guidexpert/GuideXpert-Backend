@@ -13,6 +13,7 @@ const WHATSAPP_MESSAGE_KINDS = Object.freeze([
   'guidance_booking_submit',
   'guidance_pre30min',
   'guidance_counsellor_booking_notify',
+  'jee_mock_test_submit',
 ]);
 
 const whatsAppMessageEventSchema = new mongoose.Schema({
@@ -79,12 +80,18 @@ const whatsAppMessageEventSchema = new mongoose.Schema({
     default: null,
     index: true
   },
+  mockTestLeadId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'MockTestLead',
+    default: null,
+    index: true
+  },
   /** IST booking instant for cohort tagging when FormSubmission.slotDate is unavailable (e.g. IIT product) */
   cohortSlotInstantUtc: { type: Date, default: null, index: true },
   /** Product line for WhatsApp ops Overview filtering; legacy omit → GuideXpert */
   opsProduct: {
     type: String,
-    enum: ['guidexpert', 'iit_counselling', 'one_on_one_counseling', 'guidance_booking'],
+    enum: ['guidexpert', 'iit_counselling', 'one_on_one_counseling', 'guidance_booking', 'jee_mock_test'],
     default: 'guidexpert',
     index: true
   },
@@ -111,6 +118,7 @@ const whatsAppMessageEventSchema = new mongoose.Schema({
       'one_on_one_submit',
       'guidance_booking_submit',
       'guidance_counsellor_booking_notify',
+      'jee_mock_test_submit',
     ]
   },
   templateIdEnvKey: { type: String, trim: true, maxlength: 64, default: null },

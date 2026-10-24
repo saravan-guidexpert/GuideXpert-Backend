@@ -60,12 +60,13 @@ const whatsAppManualRecoveryJobSchema = new mongoose.Schema({
       'one_on_one_submit',
       'guidance_booking_submit',
       'guidance_counsellor_booking_notify',
+      'jee_mock_test_submit',
     ],
     index: true
   },
   opsProduct: {
     type: String,
-    enum: ['guidexpert', 'iit_counselling', 'one_on_one_counseling', 'guidance_booking'],
+    enum: ['guidexpert', 'iit_counselling', 'one_on_one_counseling', 'guidance_booking', 'jee_mock_test'],
     default: 'guidexpert',
     index: true,
   },

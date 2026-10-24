@@ -32,6 +32,12 @@ const {
   resolveOneOnOneHeaderImageUrl,
 } = require('../utils/oneOnOneCounselingWhatsApp');
 const {
+  GUPSHUP_TEMPLATE_JEE_MOCK_TEST_INFLUENCER,
+  JEE_MOCK_TEST_INFLUENCER_TEMPLATE_ID,
+  JEE_MOCK_TEST_HEADER_MISSING_ERROR,
+  resolveJeeMockTestHeaderImageUrl,
+} = require('../utils/jeeMockTestWhatsApp');
+const {
   GUPSHUP_TEMPLATE_GUIDANCE_BOOKING_CONFIRM,
   GUIDANCE_BOOKING_CONFIRM_PARAM_KEYS,
   GUPSHUP_TEMPLATE_GUIDANCE_PRE30MIN_REMINDER,
@@ -447,6 +453,32 @@ async function sendOneOnOneSubmitWhatsApp(phone10, vars, sendOpts = {}) {
   });
 }
 
+/** JEE mock test registration: name body + IMAGE header. Template id comes from the UTM map. */
+async function sendJeeMockTestSubmitWhatsApp(phone10, vars, sendOpts = {}) {
+  const envKey =
+    typeof sendOpts.templateEnvKey === 'string' && sendOpts.templateEnvKey.trim()
+      ? sendOpts.templateEnvKey.trim()
+      : GUPSHUP_TEMPLATE_JEE_MOCK_TEST_INFLUENCER;
+  const explicitId =
+    typeof sendOpts.templateId === 'string' && sendOpts.templateId.trim() ? sendOpts.templateId.trim() : '';
+  const tid = explicitId || process.env[envKey] || JEE_MOCK_TEST_INFLUENCER_TEMPLATE_ID;
+  const params = buildParamsFromKeys(vars, SLOT_BOOKED_IIT_PARAM_KEYS);
+
+  let headerImageLink = resolveJeeMockTestHeaderImageUrl();
+  if (!headerImageLink && !isIntegrationStub()) {
+    return { success: false, error: JEE_MOCK_TEST_HEADER_MISSING_ERROR };
+  }
+  if (isIntegrationStub() && !headerImageLink) {
+    headerImageLink = 'https://example.com/jee-mock-test-stub-header.png';
+  }
+
+  return sendTemplateMessage(formatPhoneE16491(phone10), tid, params, {
+    ...sendOpts,
+    templateEnvKey: envKey,
+    headerImageLink,
+  });
+}
+
 /** Guidance booking confirmation: date + time body (no header image). */
 async function sendGuidanceBookingSubmitWhatsApp(phone10, vars, sendOpts = {}) {
   const envKey =
@@ -501,6 +533,7 @@ module.exports = {
   sendReminder30MinWhatsApp,
   sendIitReminderWhatsApp,
   sendOneOnOneSubmitWhatsApp,
+  sendJeeMockTestSubmitWhatsApp,
   sendGuidanceBookingSubmitWhatsApp,
   sendGuidancePre30MinReminderWhatsApp,
   sendGuidanceCounsellorBookingNotifyWhatsApp,

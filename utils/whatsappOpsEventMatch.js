@@ -12,6 +12,7 @@ const GUIDANCE_BOOKING_ONLY_KINDS = [
   'guidance_pre30min',
   'guidance_counsellor_booking_notify',
 ];
+const JEE_MOCK_TEST_ONLY_KINDS = ['jee_mock_test_submit'];
 
 function validateMessageKindForOpsProduct(messageKind, opsProduct) {
   if (!messageKind) return null;
@@ -21,6 +22,7 @@ function validateMessageKindForOpsProduct(messageKind, opsProduct) {
     ...IIT_ONLY_KINDS,
     ...ONE_ON_ONE_ONLY_KINDS,
     ...GUIDANCE_BOOKING_ONLY_KINDS,
+    ...JEE_MOCK_TEST_ONLY_KINDS,
   ];
   if (slug === 'iit_counselling' && otherProductKinds.filter((k) => !IIT_ONLY_KINDS.includes(k)).includes(messageKind)) {
     return 'This template is not for IIT Counselling. Switch product or pick an IIT template.';
@@ -29,7 +31,8 @@ function validateMessageKindForOpsProduct(messageKind, opsProduct) {
     slug === 'guidexpert' &&
     (IIT_ONLY_KINDS.includes(messageKind) ||
       ONE_ON_ONE_ONLY_KINDS.includes(messageKind) ||
-      GUIDANCE_BOOKING_ONLY_KINDS.includes(messageKind))
+      GUIDANCE_BOOKING_ONLY_KINDS.includes(messageKind) ||
+      JEE_MOCK_TEST_ONLY_KINDS.includes(messageKind))
   ) {
     return 'This template is not for GuideXpert. Switch product or pick a GuideXpert template.';
   }
@@ -38,6 +41,9 @@ function validateMessageKindForOpsProduct(messageKind, opsProduct) {
   }
   if (slug === 'guidance_booking' && !GUIDANCE_BOOKING_ONLY_KINDS.includes(messageKind)) {
     return 'This template is not for Guidance Booking. Switch product or pick the booking confirmation template.';
+  }
+  if (slug === 'jee_mock_test' && !JEE_MOCK_TEST_ONLY_KINDS.includes(messageKind)) {
+    return 'This template is not for JEE Mock Test. Switch product or pick the registration template.';
   }
   if (slug === 'iit_counselling' && (GX_ONLY_KINDS.includes(messageKind) || ONE_ON_ONE_ONLY_KINDS.includes(messageKind) || GUIDANCE_BOOKING_ONLY_KINDS.includes(messageKind))) {
     return 'This template is not for IIT Counselling. Switch product or pick an IIT template.';
@@ -76,6 +82,7 @@ module.exports = {
   IIT_ONLY_KINDS,
   ONE_ON_ONE_ONLY_KINDS,
   GUIDANCE_BOOKING_ONLY_KINDS,
+  JEE_MOCK_TEST_ONLY_KINDS,
   validateMessageKindForOpsProduct,
   buildOpsScopedEventMatch,
 };
