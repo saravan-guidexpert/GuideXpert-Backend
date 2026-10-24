@@ -4,7 +4,7 @@ const WhatsAppRetryGroup = require('../models/WhatsAppRetryGroup');
 const FormSubmission = require('../models/FormSubmission');
 const IitCounsellingSubmission = require('../models/IitCounsellingSubmission');
 const OneOnOneCounselingLead = require('../models/OneOnOneCounselingLead');
-const MockTestLead = require('../models/MockTestLead');
+const { loadJeeMockTestWhatsAppLead } = require('./jeeMockTestLeadLookup');
 const OneOnOneCounselor = require('../models/OneOnOneCounselor');
 const { buildSlotNotificationVariables } = require('../utils/slotNotificationFormatters');
 const { safeSendWhatsApp } = require('../utils/safeSendWhatsApp');
@@ -1088,17 +1088,10 @@ async function processSlotBookedImmediateRetries(cronRunId) {
         continue;
       }
     } else if (isJeeMockRetry) {
-      if (row.mockTestLeadId) {
-        mockTestLead = await MockTestLead.findById(row.mockTestLeadId).lean();
-      }
-      if (!mockTestLead) {
-        mockTestLead = await MockTestLead.findOne({
-          formCompleted: true,
-          $or: [{ whatsappNumber: row.phone }, { contactNumber: row.phone }],
-        })
-          .sort({ submittedAt: -1 })
-          .lean();
-      }
+      mockTestLead = await loadJeeMockTestWhatsAppLead({
+        id: row.mockTestLeadId,
+        phone: row.phone,
+      });
       if (!mockTestLead || !resolveJeeMockTestTemplate(mockTestLead)) {
         failed += 1;
         await WhatsAppMessageEvent.updateOne(

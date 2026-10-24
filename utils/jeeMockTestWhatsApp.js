@@ -87,10 +87,29 @@ function ensureJeeMockTestTemplateEnv(template) {
 }
 
 /**
- * @param {{ name?: string }} lead
+ * Either mock-test lead shape, with the name and phone the template send expects.
+ * Homepage registrations store studentName and mobileNumber.
+ * @param {object|null|undefined} doc
+ */
+function asJeeMockTestWhatsAppLead(doc) {
+  if (!doc || typeof doc !== 'object') return null;
+  const name = String(doc.name || doc.studentName || '').trim();
+  const contactNumber = String(doc.contactNumber || doc.mobileNumber || '').trim();
+  const whatsappNumber = String(doc.whatsappNumber || '').trim();
+  return {
+    ...doc,
+    name,
+    contactNumber,
+    whatsappNumber,
+  };
+}
+
+/**
+ * @param {{ name?: string, studentName?: string }} lead
  */
 function buildJeeMockTestSubmitVars(lead) {
-  const name = String(lead?.name || '').trim() || 'Student';
+  const normalized = asJeeMockTestWhatsAppLead(lead);
+  const name = String(normalized?.name || '').trim() || 'Student';
   return { name, Name: name };
 }
 
@@ -105,5 +124,6 @@ module.exports = {
   resolveJeeMockTestTemplate,
   resolveJeeMockTestHeaderImageUrl,
   ensureJeeMockTestTemplateEnv,
+  asJeeMockTestWhatsAppLead,
   buildJeeMockTestSubmitVars,
 };

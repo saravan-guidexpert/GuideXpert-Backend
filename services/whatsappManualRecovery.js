@@ -22,7 +22,7 @@ const WhatsAppRetryGroup = require('../models/WhatsAppRetryGroup');
 const FormSubmission = require('../models/FormSubmission');
 const IitCounsellingSubmission = require('../models/IitCounsellingSubmission');
 const OneOnOneCounselingLead = require('../models/OneOnOneCounselingLead');
-const MockTestLead = require('../models/MockTestLead');
+const { loadJeeMockTestWhatsAppLead } = require('./jeeMockTestLeadLookup');
 const GuidanceSlot = require('../models/GuidanceSlot');
 const gupshupService = require('./gupshupService');
 const { sendIitReminderWhatsApp } = require('./gupshupService');
@@ -167,18 +167,10 @@ async function resolveRecipientForRecovery({ phone, messageKind, opsProduct, lin
   }
 
   if (useJeeMockTest) {
-    let lead = null;
-    if (lineage?.mockTestLeadId && mongoose.Types.ObjectId.isValid(String(lineage.mockTestLeadId))) {
-      lead = await MockTestLead.findById(lineage.mockTestLeadId).lean();
-    }
-    if (!lead) {
-      lead = await MockTestLead.findOne({
-        formCompleted: true,
-        $or: [{ whatsappNumber: phone }, { contactNumber: phone }],
-      })
-        .sort({ submittedAt: -1 })
-        .lean();
-    }
+    const lead = await loadJeeMockTestWhatsAppLead({
+      id: lineage?.mockTestLeadId,
+      phone,
+    });
     if (!lead) return { error: 'missing_mock_test_lead' };
     return {
       iitSub: null,

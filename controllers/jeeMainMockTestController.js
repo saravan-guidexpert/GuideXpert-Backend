@@ -7,6 +7,7 @@ const otpStore = require('../utils/otpStore');
 const VerifiedPhoneSession = require('../models/VerifiedPhoneSession');
 const IitCounsellingVisit = require('../models/IitCounsellingVisit');
 const IitCounsellingUtmSavedLink = require('../models/IitCounsellingUtmSavedLink');
+const { dispatchJeeMockTestWhatsApp } = require('../services/jeeMockTestWhatsAppDispatch');
 
 const INDIAN_MOBILE_REGEX = /^[6-9]\d{9}$/;
 const VERIFIED_TTL_MS = 15 * 60 * 1000;
@@ -357,6 +358,7 @@ exports.saveJeeMainMockTestSection2 = async (req, res) => {
           collegeName: collegeName.text,
           location: location.text,
           remarks: remarksRaw,
+          ...optionalUtm(body),
           currentStep: 2,
           formCompleted: true,
           submittedAt: new Date(),
@@ -370,6 +372,14 @@ exports.saveJeeMainMockTestSection2 = async (req, res) => {
         success: false,
         message: 'Registration not found or already submitted. Please start from step 1.',
       });
+    }
+
+    const whatsappSubmit = await dispatchJeeMockTestWhatsApp(doc.toObject());
+    if (whatsappSubmit?.attempted && whatsappSubmit.success === false) {
+      console.warn(
+        '[saveJeeMainMockTestSection2] registration saved; WhatsApp not sent:',
+        whatsappSubmit.error || whatsappSubmit.skippedReason
+      );
     }
 
     return res.status(200).json({

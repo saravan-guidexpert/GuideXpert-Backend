@@ -71,6 +71,7 @@ describe('jee mock test UTM templates', () => {
 
   test('name is the template variable', () => {
     assert.deepEqual(buildJeeMockTestSubmitVars({ name: 'Asha' }), { name: 'Asha', Name: 'Asha' });
+    assert.deepEqual(buildJeeMockTestSubmitVars({ studentName: 'Asha' }), { name: 'Asha', Name: 'Asha' });
     assert.equal(buildJeeMockTestSubmitVars({}).name, 'Student');
   });
 
