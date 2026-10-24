@@ -28,7 +28,7 @@ function actorId(req) {
 
 exports.listStudents = async (req, res) => {
   try {
-    const data = await studentService.listStudents(req.query || {});
+    const data = await studentService.listStudents(req.query || {}, actorId(req));
     return send(res, 200, { success: true, data });
   } catch (err) {
     return handle(res, err, '[crm] list students');
@@ -49,7 +49,7 @@ exports.createStudent = async (req, res) => {
 
 exports.getStudent = async (req, res) => {
   try {
-    const student = await studentService.getStudent(req.params.id);
+    const student = await studentService.getStudent(req.params.id, actorId(req));
     return send(res, 200, { success: true, data: { student } });
   } catch (err) {
     return handle(res, err, '[crm] get student');
@@ -67,7 +67,7 @@ exports.updateStudent = async (req, res) => {
 
 exports.getStudentReferral = async (req, res) => {
   try {
-    const data = await referralService.getStudentReferral(req.params.id);
+    const data = await referralService.getStudentReferral(req.params.id, actorId(req));
     return send(res, 200, { success: true, data });
   } catch (err) {
     return handle(res, err, '[crm] get student referral');
@@ -76,7 +76,7 @@ exports.getStudentReferral = async (req, res) => {
 
 exports.getAnalytics = async (req, res) => {
   try {
-    const data = await analyticsService.getAnalytics(req.query || {});
+    const data = await analyticsService.getAnalytics(req.query || {}, new Date(), actorId(req));
     return send(res, 200, { success: true, data });
   } catch (err) {
     return handle(res, err, '[crm] analytics');
@@ -85,7 +85,7 @@ exports.getAnalytics = async (req, res) => {
 
 exports.getCalendar = async (req, res) => {
   try {
-    const data = await analyticsService.getCalendar(req.query || {});
+    const data = await analyticsService.getCalendar(req.query || {}, actorId(req));
     return send(res, 200, { success: true, data });
   } catch (err) {
     return handle(res, err, '[crm] calendar');
@@ -94,7 +94,7 @@ exports.getCalendar = async (req, res) => {
 
 exports.listReferrals = async (req, res) => {
   try {
-    const data = await referralService.listReferrals(req.query || {});
+    const data = await referralService.listReferrals(req.query || {}, actorId(req));
     return send(res, 200, { success: true, data });
   } catch (err) {
     return handle(res, err, '[crm] list referrals');
@@ -131,9 +131,75 @@ exports.correctReferralSource = async (req, res) => {
 exports.listAudits = async (req, res) => {
   try {
     const auditService = require('../services/crm/auditService');
-    const data = await auditService.listAudits(req.query || {});
+    const data = await auditService.listAudits(req.query || {}, actorId(req));
     return send(res, 200, { success: true, data });
   } catch (err) {
     return handle(res, err, '[crm] list audits');
+  }
+};
+
+function activityActor(req) {
+  if (req.crmUser) {
+    return {
+      _id: req.crmUser._id,
+      actorType: 'crm-user',
+      permissions: Array.isArray(req.crmUser.permissions) ? req.crmUser.permissions : [],
+    };
+  }
+  return {
+    _id: req.admin._id,
+    actorType: 'admin',
+    isSuperAdmin: req.admin.isSuperAdmin === true,
+    sectionAccess: Array.isArray(req.admin.sectionAccess) ? req.admin.sectionAccess : [],
+  };
+}
+
+exports.listActivity = async (req, res) => {
+  try {
+    const activityService = require('../services/crm/activityService');
+    const data = await activityService.listActivity(req.query || {}, activityActor(req));
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] list activity');
+  }
+};
+
+exports.getActivity = async (req, res) => {
+  try {
+    const activityService = require('../services/crm/activityService');
+    const event = await activityService.getActivity(req.params.source, req.params.id, activityActor(req));
+    return send(res, 200, { success: true, data: { event } });
+  } catch (err) {
+    return handle(res, err, '[crm] get activity');
+  }
+};
+
+exports.activitySummary = async (req, res) => {
+  try {
+    const activityService = require('../services/crm/activityService');
+    const data = await activityService.summarizeActivity(req.query || {}, activityActor(req));
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] activity summary');
+  }
+};
+
+exports.operations = async (req, res) => {
+  try {
+    const operations = require('../services/crm/crmOperations');
+    const data = await operations.getOperations(activityActor(req), req.query || {}, new Date());
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] operations');
+  }
+};
+
+exports.consultancyOverview = async (req, res) => {
+  try {
+    const operations = require('../services/crm/crmOperations');
+    const data = await operations.listConsultancyOverview(activityActor(req), req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] consultancy overview');
   }
 };

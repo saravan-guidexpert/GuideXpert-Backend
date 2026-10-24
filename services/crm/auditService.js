@@ -2,7 +2,10 @@
 
 const mongoose = require('mongoose');
 const CrmAuditLog = require('../../models/CrmAuditLog');
+const CrmConsultancyContact = require('../../models/CrmConsultancyContact');
+const CrmReferral = require('../../models/CrmReferral');
 const { parsePageLimit } = require('../../utils/crmHttp');
+const { assignedConsultancyIds } = require('./crmAccess');
 
 const SECRET_KEY = /password|token|otp|secret|authorization|mongodb|connection/i;
 
@@ -65,11 +68,33 @@ function resetAuditWriterForTests() {
   };
 }
 
-async function listAudits(query) {
+async function businessAuditScope(consultancyIds) {
+  if (consultancyIds == null) return {};
+  const [contactIds, referrals] = await Promise.all([
+    CrmConsultancyContact.find({ consultancyId: { $in: consultancyIds } }).distinct('_id'),
+    CrmReferral.find({ consultancyId: { $in: consultancyIds } }).select('_id crmStudentId').lean(),
+  ]);
+  return {
+    $or: [
+      { entityType: 'consultancy', entityId: { $in: consultancyIds } },
+      { entityType: 'consultancy_contact', entityId: { $in: contactIds } },
+      { entityType: 'crmReferral', entityId: { $in: referrals.map((row) => row._id) } },
+      { entityType: 'crmStudent', entityId: { $in: referrals.map((row) => row.crmStudentId) } },
+    ],
+  };
+}
+
+async function scopedAuditFilter(actor) {
+  const consultancyIds = await assignedConsultancyIds(actor);
+  return businessAuditScope(consultancyIds);
+}
+
+async function listAudits(query, actor) {
   const { page, limit, skip } = parsePageLimit(query);
+  const filter = await scopedAuditFilter(actor);
   const [rows, total] = await Promise.all([
-    CrmAuditLog.find({}).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
-    CrmAuditLog.countDocuments({}),
+    CrmAuditLog.find(filter).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
+    CrmAuditLog.countDocuments(filter),
   ]);
   return {
     items: rows.map((row) => ({
@@ -93,6 +118,7 @@ async function listAudits(query) {
 module.exports = {
   writeAudit,
   listAudits,
+  businessAuditScope,
   sanitizeAuditValue,
   setAuditWriterForTests,
   resetAuditWriterForTests,

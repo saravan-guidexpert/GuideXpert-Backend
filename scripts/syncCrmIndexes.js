@@ -51,6 +51,8 @@ function crmModels() {
     require('../models/CrmSession'),
     require('../models/CrmPasswordReset'),
     require('../models/CrmAuthAuditLog'),
+    require('../models/CrmConsultancyAssignment'),
+    require('../models/CrmRateLimit'),
   ];
 }
 

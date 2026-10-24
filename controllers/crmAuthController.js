@@ -54,3 +54,22 @@ exports.resetPassword = async (req, res) => {
     return fail(res, err);
   }
 };
+
+exports.heartbeat = async (req, res) => {
+  try {
+    const presence = require('../services/crm/crmPresence');
+    return send(res, await presence.heartbeat(req));
+  } catch (err) {
+    return fail(res, err);
+  }
+};
+
+exports.presence = async (req, res) => {
+  try {
+    const presence = require('../services/crm/crmPresence');
+    const data = await presence.ownPresence(req, req.query || {});
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    return fail(res, err);
+  }
+};

@@ -27,5 +27,7 @@ crmAuditLogSchema.pre('validate', function validateAuditActor() {
 crmAuditLogSchema.index({ entityType: 1, entityId: 1, createdAt: -1 });
 crmAuditLogSchema.index({ actorCrmUserId: 1, createdAt: -1 });
 crmAuditLogSchema.index({ actorAdminId: 1, createdAt: -1 });
+// Activity pages always sort by time. Actor and entity indexes do not serve that sort.
+crmAuditLogSchema.index({ createdAt: -1, _id: -1 });
 
 module.exports = mongoose.model('CrmAuditLog', crmAuditLogSchema);

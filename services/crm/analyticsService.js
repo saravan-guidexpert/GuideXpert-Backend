@@ -14,6 +14,7 @@ const {
   monthLabel,
 } = require('../../utils/crmRange');
 const { pageReferrals } = require('./referralService');
+const { assignedConsultancyIds } = require('./crmAccess');
 
 const KNOWN_EXCEPT_OPEN = ADMISSION_STATUSES.filter((status) => status !== 'Not started');
 
@@ -80,16 +81,17 @@ async function groupByFormat(match, format, timeZone) {
   ]);
 }
 
-async function volumeFor(range) {
+async function volumeFor(range, match) {
+  const scoped = match || rangeMatch(range);
   if (range.grain === 'day' && range.from && range.to) {
-    const grouped = await groupByFormat(rangeMatch(range), '%Y-%m-%d', range.timeZone);
+    const grouped = await groupByFormat(scoped, '%Y-%m-%d', range.timeZone);
     return {
       grain: 'day',
       truncated: false,
       points: fillCounts(eachDateKey(range.from, range.to), grouped, dayLabel),
     };
   }
-  const grouped = await groupByFormat(rangeMatch(range), '%Y-%m', range.timeZone);
+  const grouped = await groupByFormat(scoped, '%Y-%m', range.timeZone);
   if (!range.from || !range.to) {
     const present = grouped.map((row) => row._id).filter(Boolean).sort();
     if (present.length === 0) return { grain: 'month', truncated: false, points: [] };
@@ -169,18 +171,28 @@ async function rankConsultancies(match) {
     .sort((a, b) => b.enrolled - a.enrolled || b.admitted - a.admitted || b.referrals - a.referrals || a.name.localeCompare(b.name));
 }
 
-async function getAnalytics(query, now = new Date()) {
+async function getAnalytics(query, now = new Date(), actor) {
   const range = resolveAnalyticsRange(query, now);
   const match = rangeMatch(range);
+  const allowed = await assignedConsultancyIds(actor);
+  if (allowed) match.consultancyId = { $in: allowed };
+  const previous = previousBounds(range);
+  const consultancyFilter = allowed
+    ? { _id: { $in: allowed }, deletedAt: null, status: 'active' }
+    : { deletedAt: null, status: 'active' };
+  const undatedFilter = { $or: [{ referredAt: null }, { referredAt: { $exists: false } }] };
+  if (allowed) undatedFilter.consultancyId = { $in: allowed };
+  const previousFilter = previous
+    ? { referredAt: { $gte: previous.start, $lte: previous.end } }
+    : null;
+  if (previousFilter && allowed) previousFilter.consultancyId = { $in: allowed };
   const [distribution, volume, ranking, activeConsultancies, undatedReferrals, previousPeriodReferrals] = await Promise.all([
     statusCounts(match),
-    volumeFor(range),
+    volumeFor(range, match),
     rankConsultancies(match),
-    CrmConsultancy.countDocuments({ deletedAt: null, status: 'active' }),
-    CrmReferral.countDocuments({ $or: [{ referredAt: null }, { referredAt: { $exists: false } }] }),
-    previousBounds(range)
-      ? CrmReferral.countDocuments({ referredAt: { $gte: previousBounds(range).start, $lte: previousBounds(range).end } })
-      : Promise.resolve(null),
+    CrmConsultancy.countDocuments(consultancyFilter),
+    CrmReferral.countDocuments(undatedFilter),
+    previousFilter ? CrmReferral.countDocuments(previousFilter) : Promise.resolve(null),
   ]);
   const referralsInPeriod = distribution.reduce((sum, row) => sum + row.count, 0);
   return {
@@ -207,10 +219,12 @@ async function getAnalytics(query, now = new Date()) {
   };
 }
 
-async function getCalendar(query) {
+async function getCalendar(query, actor) {
   const range = resolveCalendarRange(query);
   const { page, limit, skip } = parsePageLimit(query);
   const match = rangeMatch(range);
+  const allowed = await assignedConsultancyIds(actor);
+  if (allowed) match.consultancyId = { $in: allowed };
   const [grouped, pageResult] = await Promise.all([
     groupByFormat(match, '%Y-%m-%d', range.timeZone),
     pageReferrals(match, { page, limit, skip, sort: { referredAt: 1, _id: 1 } }),
@@ -228,4 +242,6 @@ async function getCalendar(query) {
 module.exports = {
   getAnalytics,
   getCalendar,
+  referralVolume: volumeFor,
+  statusCounts,
 };

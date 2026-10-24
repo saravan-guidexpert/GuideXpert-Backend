@@ -14,7 +14,8 @@ const {
 } = require('../../constants/crmUsers');
 const { hashPassword, validatePassword } = require('./crmUserPassword');
 const { accountSnapshot, writeAuthAudit } = require('./crmAuthAudit');
-const { issuePasswordToken } = require('./crmPasswordResetService');
+const { invalidateOutstandingResetTokens, issuePasswordToken } = require('./crmPasswordResetService');
+const { commitWithAudit } = require('../../utils/crmMutation');
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -84,18 +85,29 @@ function isPrivileged(user) {
   return CRM_PRIVILEGED_PERMISSIONS.every((key) => granted.includes(key));
 }
 
-async function otherPrivilegedCount(userId) {
-  return CrmUser.countDocuments({
+function duplicateKey(err) {
+  let current = err;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    if (isMongoDuplicateKeyError(current)) return true;
+    current = current.cause || current.errorResponse || null;
+  }
+  return false;
+}
+
+async function otherPrivilegedCount(userId, session) {
+  const query = CrmUser.countDocuments({
     _id: { $ne: userId },
     deletedAt: null,
     status: 'active',
     permissions: { $all: CRM_PRIVILEGED_PERMISSIONS },
   });
+  if (session) query.session(session);
+  return query;
 }
 
-async function assertKeepsPrivilegedAccount(existing, next) {
+async function assertKeepsPrivilegedAccount(existing, next, session) {
   if (!isPrivileged(existing) || isPrivileged(next)) return;
-  const others = await otherPrivilegedCount(existing._id);
+  const others = await otherPrivilegedCount(existing._id, session);
   if (others < 1) {
     throw new CrmError(
       409,
@@ -163,9 +175,20 @@ function toDTO(user) {
   };
 }
 
-async function revokeSessions(user) {
+async function revokeSessions(user, session) {
+  if (!session) {
+    throw new CrmError(
+      503,
+      'This change requires a MongoDB transaction, and this database does not support transactions. Nothing was changed.',
+      'transaction_required'
+    );
+  }
   user.sessionVersion = (user.sessionVersion || 1) + 1;
-  await CrmSession.updateMany({ userId: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
+  await CrmSession.updateMany(
+    { userId: user._id, revokedAt: null },
+    { $set: { revokedAt: new Date() } },
+    { session }
+  );
 }
 
 async function summary() {
@@ -232,7 +255,23 @@ async function getUser(id) {
   return toDTO(user);
 }
 
+function rejectAssignmentFields(body) {
+  const forbidden = ['assignments', 'consultancyIds', 'consultancyId', 'ownerId'];
+  if (forbidden.some((key) => body && Object.prototype.hasOwnProperty.call(body, key))) {
+    throw new CrmError(400, 'Assignments are changed through the assignment endpoint.', 'invalid_body');
+  }
+}
+
+function rejectPresenceFields(body) {
+  const forbidden = ['lastSeenAt', 'sessionId', 'sessions', 'presence', 'revokedAt'];
+  if (forbidden.some((key) => body && Object.prototype.hasOwnProperty.call(body, key))) {
+    throw new CrmError(400, 'Session presence cannot be changed through the account endpoint.', 'invalid_body');
+  }
+}
+
 async function createUser(actor, body, req) {
+  rejectAssignmentFields(body);
+  rejectPresenceFields(body);
   if (actor.kind === 'crm-user' && !(actor.permissions || []).includes('crm.users.create')) {
     throw new CrmError(403, 'You do not have permission to create CRM users.', 'permission_denied');
   }
@@ -254,37 +293,42 @@ async function createUser(actor, body, req) {
     throw new CrmError(400, 'Status must be active or inactive.', 'invalid_body');
   }
   const authorship = actorFields(actor, null);
+  const passwordHash = invite ? '' : await hashPassword(password);
   try {
-    const user = await CrmUser.create({
-      email,
-      username,
-      fullName,
-      passwordHash: invite ? '' : await hashPassword(password),
-      status,
-      role,
-      permissions,
-      passwordChangedAt: invite ? null : new Date(),
-      ...authorship,
+    const { payload } = await commitWithAudit({
+      requireTransaction: true,
+      mutate: async (session) => {
+        const created = await CrmUser.create([{
+          email,
+          username,
+          fullName,
+          passwordHash,
+          status,
+          role,
+          permissions,
+          passwordChangedAt: invite ? null : new Date(),
+          ...authorship,
+        }], { session });
+        const user = created[0];
+        const setup = invite ? await issuePasswordToken(user, actor, 'invite', session) : null;
+        return { user, setup };
+      },
+      audit: (session, created) => writeAuthAudit({
+        ...auditActor(actor),
+        targetUserId: created.user._id,
+        action: invite ? 'crm_user.invited' : 'crm_user.created',
+        after: accountSnapshot(created.user),
+      }, req, session),
     });
-    let setup = null;
-    if (invite) {
-      setup = await issuePasswordToken(user, actor, 'invite');
-    }
-    await writeAuthAudit({
-      ...auditActor(actor),
-      targetUserId: user._id,
-      action: invite ? 'crm_user.invited' : 'crm_user.created',
-      after: accountSnapshot(user),
-    }, req);
-    const data = { user: toDTO(user) };
-    if (setup) {
-      data.setupToken = setup.token;
-      data.setupTokenExpiresAt = setup.expiresAt;
+    const data = { user: toDTO(payload.user) };
+    if (payload.setup) {
+      data.setupToken = payload.setup.token;
+      data.setupTokenExpiresAt = payload.setup.expiresAt;
       data.delivery = 'admin_display';
     }
     return data;
   } catch (err) {
-    if (isMongoDuplicateKeyError(err)) {
+    if (duplicateKey(err)) {
       throw new CrmError(409, 'An account with this email or username already exists.', 'duplicate_account');
     }
     throw err;
@@ -296,6 +340,8 @@ function accessWillChange(existing, role, permissions) {
 }
 
 async function updateUser(actor, id, body, req, options = {}) {
+  rejectAssignmentFields(body);
+  rejectPresenceFields(body);
   const actorPermissions = actor.permissions || [];
   if (!options.skipBasePermission && actor.kind === 'crm-user' && !actorPermissions.includes('crm.users.update')) {
     throw new CrmError(403, 'You do not have permission to update CRM users.', 'permission_denied');
@@ -334,31 +380,52 @@ async function updateUser(actor, id, body, req, options = {}) {
     deletedAt: null,
     permissions: nextPermissions,
   });
-  const wasActive = existing.status === 'active';
-  existing.role = nextRole;
-  existing.permissions = nextPermissions;
-  existing.status = nextStatus;
-  const authorship = actorFields(actor, existing);
-  existing.updatedByAdminId = authorship.updatedByAdminId;
-  existing.updatedByCrmUserId = authorship.updatedByCrmUserId;
-  if (wasActive && nextStatus !== 'active') await revokeSessions(existing);
+  const nextEmail = existing.email;
+  const nextUsername = existing.username;
+  const nextName = existing.fullName;
+  const reason = typeof body.reason === 'string' ? body.reason.slice(0, 500) : '';
   try {
-    await existing.save();
+    const { payload } = await commitWithAudit({
+      requireTransaction: true,
+      mutate: async (session) => {
+        const current = await CrmUser.findOne({ _id: existing._id, deletedAt: null }).session(session).select('+passwordHash');
+        if (!current) throw new CrmError(404, 'CRM user not found.', 'not_found');
+        await assertKeepsPrivilegedAccount(current, {
+          status: nextStatus,
+          deletedAt: null,
+          permissions: nextPermissions,
+        }, session);
+        const wasActive = current.status === 'active';
+        current.email = nextEmail;
+        current.username = nextUsername;
+        current.fullName = nextName;
+        current.role = nextRole;
+        current.permissions = nextPermissions;
+        current.status = nextStatus;
+        const authorship = actorFields(actor, current);
+        current.updatedByAdminId = authorship.updatedByAdminId;
+        current.updatedByCrmUserId = authorship.updatedByCrmUserId;
+        if (wasActive && nextStatus !== 'active') await revokeSessions(current, session);
+        await current.save({ session });
+        return { user: current, deactivated: wasActive && nextStatus !== 'active' };
+      },
+      audit: (session, saved) => writeAuthAudit({
+        ...auditActor(actor),
+        targetUserId: saved.user._id,
+        action: saved.deactivated ? 'crm_user.deactivated' : 'crm_user.updated',
+        reason,
+        before,
+        after: accountSnapshot(saved.user),
+      }, req, session),
+    });
+    return { user: toDTO(payload.user) };
   } catch (err) {
-    if (isMongoDuplicateKeyError(err)) {
+    if (err instanceof CrmError) throw err;
+    if (duplicateKey(err)) {
       throw new CrmError(409, 'An account with this email or username already exists.', 'duplicate_account');
     }
     throw err;
   }
-  await writeAuthAudit({
-    ...auditActor(actor),
-    targetUserId: existing._id,
-    action: wasActive && nextStatus !== 'active' ? 'crm_user.deactivated' : 'crm_user.updated',
-    reason: typeof body.reason === 'string' ? body.reason.slice(0, 500) : '',
-    before,
-    after: accountSnapshot(existing),
-  }, req);
-  return { user: toDTO(existing) };
 }
 
 async function setStatus(actor, id, status, req, reason) {
@@ -375,41 +442,59 @@ async function resetPassword(actor, id, body, req) {
   }
   const user = await CrmUser.findOne({ _id: parseObjectId(id, 'User id'), deletedAt: null }).select('+passwordHash');
   if (!user) throw new CrmError(404, 'CRM user not found.', 'not_found');
-  const before = accountSnapshot(user);
   if (body && body.issueToken === true) {
-    const issued = await issuePasswordToken(user, actor, 'reset');
-    await writeAuthAudit({
-      ...auditActor(actor),
-      targetUserId: user._id,
-      action: 'crm_user.reset_issued',
-      before,
-      after: accountSnapshot(user),
-    }, req);
+    const { payload } = await commitWithAudit({
+      requireTransaction: true,
+      mutate: async (session) => {
+        const current = await CrmUser.findOne({ _id: user._id, deletedAt: null }).session(session);
+        if (!current) throw new CrmError(404, 'CRM user not found.', 'not_found');
+        const issued = await issuePasswordToken(current, actor, 'reset', session);
+        return { issued, user: current };
+      },
+      audit: (session, saved) => writeAuthAudit({
+        ...auditActor(actor),
+        targetUserId: saved.user._id,
+        action: 'crm_user.reset_issued',
+        before: accountSnapshot(saved.user),
+        after: accountSnapshot(saved.user),
+      }, req, session),
+    });
     return {
       delivery: 'admin_display',
-      resetToken: issued.token,
-      resetTokenExpiresAt: issued.expiresAt,
-      user: toDTO(user),
+      resetToken: payload.issued.token,
+      resetTokenExpiresAt: payload.issued.expiresAt,
+      user: toDTO(payload.user),
     };
   }
   const password = body && typeof body.password === 'string' ? body.password : '';
   validatePassword(password, [user.email, user.username]);
-  user.passwordHash = await hashPassword(password);
-  user.passwordChangedAt = new Date();
-  if (user.status === 'invited') user.status = 'active';
-  await revokeSessions(user);
-  const authorship = actorFields(actor, user);
-  user.updatedByAdminId = authorship.updatedByAdminId;
-  user.updatedByCrmUserId = authorship.updatedByCrmUserId;
-  await user.save();
-  await writeAuthAudit({
-    ...auditActor(actor),
-    targetUserId: user._id,
-    action: 'crm_user.password_reset',
-    before,
-    after: accountSnapshot(user),
-  }, req);
-  return { user: toDTO(user), delivery: 'password_set' };
+  const passwordHash = await hashPassword(password);
+  const { payload } = await commitWithAudit({
+    requireTransaction: true,
+    mutate: async (session) => {
+      const current = await CrmUser.findOne({ _id: user._id, deletedAt: null }).session(session).select('+passwordHash');
+      if (!current) throw new CrmError(404, 'CRM user not found.', 'not_found');
+      const before = accountSnapshot(current);
+      await invalidateOutstandingResetTokens(current._id, session);
+      current.passwordHash = passwordHash;
+      current.passwordChangedAt = new Date();
+      if (current.status === 'invited') current.status = 'active';
+      await revokeSessions(current, session);
+      const authorship = actorFields(actor, current);
+      current.updatedByAdminId = authorship.updatedByAdminId;
+      current.updatedByCrmUserId = authorship.updatedByCrmUserId;
+      await current.save({ session });
+      return { before, user: current };
+    },
+    audit: (session, saved) => writeAuthAudit({
+      ...auditActor(actor),
+      targetUserId: saved.user._id,
+      action: 'crm_user.password_reset',
+      before: saved.before,
+      after: accountSnapshot(saved.user),
+    }, req, session),
+  });
+  return { user: toDTO(payload.user), delivery: 'password_set' };
 }
 
 async function listUserAudit(id, query) {
@@ -454,4 +539,5 @@ module.exports = {
   toDTO,
   normalizeEmail,
   isPrivileged,
+  revokeSessions,
 };

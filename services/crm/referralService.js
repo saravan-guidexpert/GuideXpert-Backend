@@ -11,6 +11,12 @@ const { parsePageLimit, parseObjectId, requestMeta } = require('../../utils/crmH
 const { resolveListRange } = require('../../utils/crmRange');
 const { writeAudit } = require('./auditService');
 const { actorId, auditActor } = require('./fields');
+const {
+  assertConsultancyAccess,
+  assertReferralAccess,
+  assertStudentAccess,
+  assignedConsultancyIds,
+} = require('./crmAccess');
 const { ADMISSION_STATUSES, CRM_REASON_MIN, CRM_REASON_MAX } = require('../../constants/crm');
 
 function toReferral(doc, extras = {}) {
@@ -115,8 +121,12 @@ async function loadContact(consultancy, contactId) {
 }
 
 async function createReferral(actor, input, req) {
-  const student = await loadEligibleStudent(input && input.crmStudentId);
-  const consultancy = await loadEligibleConsultancy(input && input.consultancyId);
+  const studentId = parseObjectId(input && input.crmStudentId, 'Student id');
+  await assertStudentAccess(actor, studentId);
+  const student = await loadEligibleStudent(input.crmStudentId);
+  const consultancyId = parseObjectId(input && input.consultancyId, 'Consultancy id');
+  await assertConsultancyAccess(actor, consultancyId);
+  const consultancy = await loadEligibleConsultancy(input.consultancyId);
   const contact = await loadContact(consultancy, input && input.consultancyContactId);
   const referredAt = parseReferredAt(input && input.referredAt);
   const adminId = actorId(actor);
@@ -141,6 +151,8 @@ async function createReferral(actor, input, req) {
     const { payload } = await commitWithAudit({
       requireTransaction: true,
       mutate: async (session) => {
+        await assertStudentAccess(actor, student._id, session);
+        await assertConsultancyAccess(actor, consultancy._id, session);
         const created = await CrmReferral.create([fields], { session });
         return created[0];
       },
@@ -166,10 +178,11 @@ async function createReferral(actor, input, req) {
   }
 }
 
-async function getStudentReferral(studentId) {
+async function getStudentReferral(studentId, actor) {
   const id = parseObjectId(studentId, 'Student id');
   const student = await CrmStudent.findById(id).select('fullName').lean();
   if (!student) throw new CrmError(404, 'Student not found.', 'not_found');
+  await assertStudentAccess(actor, id);
   const referral = await CrmReferral.findOne({ crmStudentId: id }).lean();
   return { referral: referral ? toReferral(referral, { studentName: student.fullName }) : null };
 }
@@ -197,11 +210,18 @@ async function pageReferrals(filter, { page, limit, skip, sort }) {
   };
 }
 
-async function listReferrals(query) {
+async function listReferrals(query, actor) {
   const { page, limit, skip } = parsePageLimit(query);
   const filter = {};
   if (query.consultancyId) filter.consultancyId = parseObjectId(query.consultancyId, 'Consultancy id');
   if (query.studentId) filter.crmStudentId = parseObjectId(query.studentId, 'Student id');
+  const allowed = await assignedConsultancyIds(actor);
+  if (allowed) {
+    const requested = filter.consultancyId;
+    const requestedAllowed = requested && allowed.some((id) => String(id) === String(requested));
+    if (requested && !requestedAllowed) filter.consultancyId = { $in: [] };
+    else if (!requested) filter.consultancyId = { $in: allowed };
+  }
   const dateRange = resolveListRange(query);
   if (dateRange) filter.referredAt = { $gte: dateRange.start, $lte: dateRange.end };
   return pageReferrals(filter, { page, limit, skip, sort: { createdAt: -1 } });
@@ -210,10 +230,13 @@ async function listReferrals(query) {
 async function correctReferralSource(actor, referralId, input, req) {
   const id = parseObjectId(referralId, 'Referral id');
   const reason = requireReason(input && input.reason);
-  const consultancy = await loadEligibleConsultancy(input && input.consultancyId);
-  const contact = await loadContact(consultancy, input && input.consultancyContactId);
+  const targetId = parseObjectId(input && input.consultancyId, 'Consultancy id');
   const existing = await CrmReferral.findById(id);
   if (!existing) throw new CrmError(404, 'Referral not found.', 'not_found');
+  await assertReferralAccess(actor, existing);
+  await assertConsultancyAccess(actor, targetId);
+  const consultancy = await loadEligibleConsultancy(input.consultancyId);
+  const contact = await loadContact(consultancy, input && input.consultancyContactId);
   if (String(existing.consultancyId) === String(consultancy._id)) {
     throw new CrmError(400, 'The referral already uses this consultancy. The source was not changed.', 'source_unchanged');
   }
@@ -226,6 +249,10 @@ async function correctReferralSource(actor, referralId, input, req) {
   const { payload } = await commitWithAudit({
     requireTransaction: true,
     mutate: async (session) => {
+      const current = await CrmReferral.findById(existing._id).session(session);
+      if (!current) throw new CrmError(404, 'Referral not found.', 'not_found');
+      await assertReferralAccess(actor, current, session);
+      await assertConsultancyAccess(actor, consultancy._id, session);
       const updated = await CrmReferral.findOneAndUpdate(
         { _id: existing._id, consultancyId: existing.consultancyId },
         {

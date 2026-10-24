@@ -26,7 +26,7 @@ function actorId(req) {
 
 exports.listConsultancies = async (req, res) => {
   try {
-    const data = await consultancyService.listConsultancies(req.query || {});
+    const data = await consultancyService.listConsultancies(req.query || {}, actorId(req));
     return send(res, 200, { success: true, data });
   } catch (err) {
     return handle(res, err, '[crm] list consultancies');
@@ -44,7 +44,7 @@ exports.createConsultancy = async (req, res) => {
 
 exports.getConsultancy = async (req, res) => {
   try {
-    const consultancy = await consultancyService.getConsultancy(req.params.id);
+    const consultancy = await consultancyService.getConsultancy(req.params.id, actorId(req));
     return send(res, 200, { success: true, data: { consultancy } });
   } catch (err) {
     return handle(res, err, '[crm] get consultancy');
@@ -62,7 +62,7 @@ exports.updateConsultancy = async (req, res) => {
 
 exports.listContacts = async (req, res) => {
   try {
-    const data = await consultancyService.listContacts(req.params.id, req.query || {});
+    const data = await consultancyService.listContacts(req.params.id, req.query || {}, actorId(req));
     return send(res, 200, { success: true, data });
   } catch (err) {
     return handle(res, err, '[crm] list contacts');

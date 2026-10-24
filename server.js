@@ -7,9 +7,9 @@ if (fs.existsSync(gupshupLocalEnv)) {
 }
 const express = require('express');
 const cors = require('cors');
+const { crmCorsOrigin } = require('./utils/crmOrigin');
+const mongoose = require('mongoose');
 const connectDB = require('./config/db');
-const { ensureLocalCrmTestUser } = require('./services/crm/ensureLocalCrmTestUser');
-const { logDbError, isTransientMongoError, publicClientMessage } = require('./utils/mongoRetry');
 const formRoutes = require('./routes/formRoutes');
 const assessmentRoutes = require('./routes/assessmentRoutes');
 const assessment2Routes = require('./routes/assessment2Routes');
@@ -36,7 +36,6 @@ const iitainSessionFeedbackRoutes = require('./routes/iitainSessionFeedbackRoute
 const oneOnOneCounselingRoutes = require('./routes/oneOnOneCounselingRoutes');
 const jeeSessionRoutes = require('./routes/jeeSessionRoutes');
 const mockTestRoutes = require('./routes/mockTestRoutes');
-const jeeMainMockTestRoutes = require('./routes/jeeMainMockTestRoutes');
 const guidanceBookingRoutes = require('./routes/guidanceBookingRoutes');
 const oneOnOneCounselorRoutes = require('./routes/oneOnOneCounselorRoutes');
 const referralRoutes = require('./routes/referralRoutes');
@@ -82,6 +81,12 @@ const {
   logWhatsAppConfigWarnings,
 } = require('./utils/whatsappConfigStatus');
 const app = express();
+// Vercel sets VERCEL=1 and terminates one proxy hop. Client-supplied
+// Forwarded headers are not trusted unless that platform variable is present.
+// Confirm the API is served by Vercel before relying on req.ip as the browser.
+if (process.env.VERCEL === '1') {
+  app.set('trust proxy', 1);
+}
 
 // OTP (MSG91): required in production only; in dev allow startup without them
 const requiredOtpEnv = ['MSG91_AUTH_KEY', 'MSG91_TEMPLATE_ID', 'OTP_SECRET'];
@@ -113,41 +118,14 @@ if (!process.env.WEBINAR_JWT_SECRET && !process.env.COUNSELLOR_JWT_SECRET) {
 }
 logWhatsAppConfigWarnings();
 
-const allowedOrigins = [
-  process.env.FRONTEND_URL,
-  'https://www.guidexpert.co.in',
-  'https://guidexpert.co.in',
-  'http://www.guidexpert.co.in',
-  'http://guidexpert.co.in',
-  'https://guide-xpert-frontend.vercel.app',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-].filter(Boolean);
-if (allowedOrigins.length === 0) allowedOrigins.push('https://guidexpert.co.in');
-// Allow any Vercel preview/production frontend (*.vercel.app)
-const vercelOriginRegex = /^https:\/\/[a-z0-9-]+(-[a-z0-9-]+)*\.vercel\.app$/i;
-// Any localhost / 127.0.0.1 port (Vite may use 5173, 5174, etc.)
-const localhostDevOriginRegex = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
-// Production/staging on guidexpert.co.in (www or subdomains)
-const guidexpertOriginRegex = /^https?:\/\/([a-z0-9-]+\.)*guidexpert\.co\.in$/i;
-
-function isAllowedCorsOrigin(origin) {
-  if (!origin) return true;
-  return (
-    allowedOrigins.includes(origin) ||
-    vercelOriginRegex.test(origin) ||
-    localhostDevOriginRegex.test(origin) ||
-    guidexpertOriginRegex.test(origin)
-  );
-}
-
 const corsOptions = {
   origin(origin, callback) {
-    if (isAllowedCorsOrigin(origin)) {
-      return callback(null, origin || allowedOrigins[0]);
-    }
-    console.warn('[cors] Blocked origin:', origin);
-    return callback(null, false);
+    return crmCorsOrigin(origin, (err, allowed) => {
+      if (origin && allowed !== origin) {
+        console.warn('[cors] Blocked an origin that is not on the CRM allow-list.');
+      }
+      return callback(err, allowed);
+    });
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -170,9 +148,33 @@ function logAdminPosterJsonBody(req, res, buf) {
 app.use(express.json({ limit: '15mb', verify: logAdminPosterJsonBody }));
 app.use(express.urlencoded({ extended: true }));
 
-// Ensure MongoDB is connected before handling requests (Vercel serverless cold start).
-// connectDB caches one attempt and will not open a second client while the first
-// is still connecting or while an existing client can recover.
+// Ensure MongoDB is connected before handling requests (Vercel serverless cold start)
+let dbConnectPromise = null;
+
+function resetDbConnectPromise() {
+  dbConnectPromise = null;
+}
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('[ensureDB] MongoDB disconnected — will reconnect on next request');
+  resetDbConnectPromise();
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('[ensureDB] MongoDB connection error:', err?.message || err);
+  resetDbConnectPromise();
+});
+
+async function ensureDbConnected() {
+  if (mongoose.connection.readyState === 1) return;
+  if (!dbConnectPromise) {
+    dbConnectPromise = connectDB().catch((err) => {
+      resetDbConnectPromise();
+      throw err;
+    });
+  }
+  await dbConnectPromise;
+}
 
 function shouldBypassDbGate(req) {
   if (req.path === '/api/health') return true;
@@ -183,10 +185,10 @@ function shouldBypassDbGate(req) {
 app.use(async (req, res, next) => {
   if (shouldBypassDbGate(req)) return next();
   try {
-    await connectDB();
+    await ensureDbConnected();
     next();
   } catch (err) {
-    logDbError('[ensureDB]', err);
+    console.error('[ensureDB]', err?.message || err);
     next(err);
   }
 });
@@ -285,7 +287,6 @@ app.use('/api/iitain-session-feedback', iitainSessionFeedbackRoutes);
 app.use('/api/one-on-one-counseling', oneOnOneCounselingRoutes);
 app.use('/api/jee-sessions', jeeSessionRoutes);
 app.use('/api/mock-test', mockTestRoutes);
-app.use('/api/jee-main-mock-test', jeeMainMockTestRoutes);
 app.use('/api/guidance-booking', guidanceBookingRoutes);
 app.use('/api/one-on-one-counselor', oneOnOneCounselorRoutes);
 app.use('/api/referral', referralRoutes);
@@ -302,13 +303,9 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  logDbError('[Server error]', err);
-  const transient = isTransientMongoError(err);
-  const safe = publicClientMessage(err, 'Something went wrong.');
-  const message = process.env.NODE_ENV === 'development'
-    ? safe
-    : (transient ? 'Database temporarily unavailable. Try again.' : 'Something went wrong.');
-  res.status(transient ? 503 : 500).json({ success: false, message });
+  console.error('[Server error]', err);
+  const message = process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong.';
+  res.status(500).json({ success: false, message });
 });
 
 const PORT = process.env.PORT || 5000;
@@ -317,9 +314,8 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
   try {
     await connectDB();
-    await ensureLocalCrmTestUser();
-    const server = app.listen(PORT, '127.0.0.1', () => {
-      console.log(`Server running on http://127.0.0.1:${PORT}`);
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
       console.log(`MongoDB connection established. Server ready to accept requests.`);
 
       if (String(process.env.DEV_IIT_CRON_LOOP || '').trim() === '1') {
@@ -372,10 +368,6 @@ const startServer = async () => {
           );
         }, tickMs);
       }
-    });
-    server.on('error', (error) => {
-      console.error(`Failed to listen on 127.0.0.1:${PORT}:`, error.message);
-      process.exit(1);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

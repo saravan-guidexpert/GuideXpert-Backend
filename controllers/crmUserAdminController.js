@@ -2,6 +2,9 @@
 
 const { CrmError } = require('../utils/crmError');
 const users = require('../services/crm/crmUserAdminService');
+const assignments = require('../services/crm/crmAssignmentService');
+const presence = require('../services/crm/crmPresence');
+const directory = require('../services/crm/crmDirectory');
 
 function actorOf(req) {
   if (req.admin) return { kind: 'admin', id: req.admin._id };
@@ -100,6 +103,87 @@ exports.resetPassword = async (req, res) => {
     return send(res, 200, { success: true, message, data });
   } catch (err) {
     return fail(res, err, '[crm-users] reset');
+  }
+};
+
+exports.listAssignments = async (req, res) => {
+  try {
+    const data = await assignments.listForUser(actorOf(req), req.params.id, req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return fail(res, err, '[crm-users] list assignments');
+  }
+};
+
+exports.listConsultancyAssignees = async (req, res) => {
+  try {
+    const data = await assignments.listForConsultancy(actorOf(req), req.params.consultancyId, req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return fail(res, err, '[crm-users] list assignees');
+  }
+};
+
+exports.assignConsultancy = async (req, res) => {
+  try {
+    const assignment = await assignments.assign(actorOf(req), req.params.id, req.body || {}, req);
+    return send(res, 201, { success: true, message: 'Consultancy assigned.', data: { assignment } });
+  } catch (err) {
+    return fail(res, err, '[crm-users] assign consultancy');
+  }
+};
+
+exports.revokeAssignment = async (req, res) => {
+  try {
+    const assignment = await assignments.revoke(actorOf(req), req.params.id, req.params.consultancyId, req);
+    return send(res, 200, { success: true, message: 'Consultancy assignment revoked.', data: { assignment } });
+  } catch (err) {
+    return fail(res, err, '[crm-users] revoke assignment');
+  }
+};
+
+exports.listPresence = async (req, res) => {
+  try {
+    const data = await presence.listPresence(actorOf(req), req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return fail(res, err, '[crm-users] presence');
+  }
+};
+
+exports.directory = async (req, res) => {
+  try {
+    const data = await directory.listDirectory(actorOf(req), req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return fail(res, err, '[crm-users] directory');
+  }
+};
+
+exports.listSessions = async (req, res) => {
+  try {
+    const data = await presence.listSessions(actorOf(req), req.params.id, req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return fail(res, err, '[crm-users] sessions');
+  }
+};
+
+exports.revokeSession = async (req, res) => {
+  try {
+    const session = await presence.revokeOne(actorOf(req), req.params.id, req.params.sessionId, req);
+    return send(res, 200, { success: true, message: 'Session revoked.', data: { session } });
+  } catch (err) {
+    return fail(res, err, '[crm-users] revoke session');
+  }
+};
+
+exports.revokeAllSessions = async (req, res) => {
+  try {
+    const data = await presence.revokeAll(actorOf(req), req.params.id, req);
+    return send(res, 200, { success: true, message: 'Sessions revoked.', data });
+  } catch (err) {
+    return fail(res, err, '[crm-users] revoke sessions');
   }
 };
 

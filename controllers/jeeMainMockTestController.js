@@ -124,7 +124,6 @@ function resolveInfluencerName(attr, lookup) {
   if (fromFull) return fromFull;
   const fromContent = lookup.byContent.get(normalizeUtmToken(content));
   if (fromContent) return fromContent;
-  if (normalizeUtmToken(attr.utm_medium) === 'influencer' && content) return content;
   return '';
 }
 

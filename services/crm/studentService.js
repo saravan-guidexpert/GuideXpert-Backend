@@ -11,6 +11,12 @@ const { ADMISSION_STATUSES } = require('../../constants/crm');
 const { writeAudit } = require('./auditService');
 const { actorId, auditActor, requireText, optionalText, optionalEmail } = require('./fields');
 const { planNewReferral, sourceSnapshot, toReferral } = require('./referralService');
+const {
+  assertConsultancyAccess,
+  assertStudentAccess,
+  isCrmActor,
+  visibleStudentIds,
+} = require('./crmAccess');
 
 function admissionStatusList() {
   return ADMISSION_STATUSES.join(', ');
@@ -97,6 +103,30 @@ function isDuplicate(err) {
   return isMongoDuplicateKeyError(err) || (err && err.cause && isMongoDuplicateKeyError(err.cause));
 }
 
+// Phone numbers are unique across the CRM. An out-of-scope conflict uses the
+// same 409 duplicate_student code and message as an in-scope conflict, with
+// no student payload. A different code would tell the caller the owner is
+// outside their consultancies. Returning success without saving would be a
+// different product contract. Hiding the fact that a write did not apply
+// requires per-consultancy phone uniqueness or an asynchronous accept.
+async function raisePhoneConflict(existing, actor) {
+  if (isCrmActor(actor)) {
+    try {
+      await assertStudentAccess(actor, existing._id);
+    } catch (err) {
+      if (err instanceof CrmError && err.code === 'not_found') {
+        throw new CrmError(
+          409,
+          'A student with this mobile number already exists. No duplicate was created.',
+          'duplicate_student'
+        );
+      }
+      throw err;
+    }
+  }
+  throw phoneConflict(existing);
+}
+
 async function createStudent(actor, input, req) {
   const fullName = requireText(input.fullName, 'Name', 2, 160);
   const phone = normalizeIndianMobile(input.phone);
@@ -107,14 +137,18 @@ async function createStudent(actor, input, req) {
   const adminId = actorId(actor);
   const meta = requestMeta(req);
   let referralPlan = null;
+  if (isCrmActor(actor) && !referralRequested(input)) {
+    throw new CrmError(400, 'An active consultancy is required to record a student.', 'consultancy_required');
+  }
   if (referralRequested(input)) {
     if (!input.consultancyId) {
       throw new CrmError(400, 'An active consultancy is required to record a referral.', 'consultancy_required');
     }
+    await assertConsultancyAccess(actor, parseObjectId(input.consultancyId, 'Consultancy id'));
     referralPlan = await planNewReferral(input, adminId);
   }
   const existing = await CrmStudent.findOne({ phone }).lean();
-  if (existing) throw phoneConflict(existing);
+  if (existing) await raisePhoneConflict(existing, actor);
 
   const studentFields = {
     fullName,
@@ -153,6 +187,7 @@ async function createStudent(actor, input, req) {
     const { payload } = await commitWithAudit({
       requireTransaction: true,
       mutate: async (session) => {
+        await assertConsultancyAccess(actor, input.consultancyId, session);
         const created = await CrmStudent.create([studentFields], { session });
         const student = created[0];
         const referrals = await CrmReferral.create([referralPlan.build(student._id)], { session });
@@ -189,16 +224,18 @@ async function createStudent(actor, input, req) {
     if (err instanceof CrmError) throw err;
     if (isDuplicate(err)) {
       const winner = await CrmStudent.findOne({ phone }).lean();
-      if (winner) throw phoneConflict(winner);
+      if (winner) await raisePhoneConflict(winner, actor);
     }
     throw err;
   }
 }
 
-async function listStudents(query) {
+async function listStudents(query, actor) {
   const { page, limit, skip } = parsePageLimit(query);
   const filter = { deletedAt: null };
   const clauses = [];
+  const studentIds = await visibleStudentIds(actor);
+  if (studentIds) clauses.push({ _id: { $in: studentIds } });
   const q = String(query.q || '').trim();
   if (q) {
     if (q.length > 100) throw new CrmError(400, 'Search text is too long.', 'invalid_search');
@@ -236,9 +273,10 @@ async function listStudents(query) {
   return { items: rows.map(toStudent), page, limit, total };
 }
 
-async function getStudent(id) {
+async function getStudent(id, actor) {
   const studentId = parseObjectId(id, 'Student id');
   const doc = await CrmStudent.findById(studentId).lean();
+  if (isCrmActor(actor)) await assertStudentAccess(actor, studentId);
   if (!doc) throw new CrmError(404, 'Student not found.', 'not_found');
   return toStudent(doc);
 }
@@ -247,6 +285,7 @@ async function updateStudent(actor, id, input, req) {
   const studentId = parseObjectId(id, 'Student id');
   const student = await CrmStudent.findById(studentId);
   if (!student) throw new CrmError(404, 'Student not found.', 'not_found');
+  await assertStudentAccess(actor, studentId);
   if (student.deletedAt) {
     throw new CrmError(409, 'This student is deleted and was not changed.', 'student_deleted');
   }
@@ -273,7 +312,7 @@ async function updateStudent(actor, id, input, req) {
     const phone = normalizeIndianMobile(input.phone);
     if (phone !== student.phone) {
       const other = await CrmStudent.findOne({ phone }).lean();
-      if (other) throw phoneConflict(other);
+      if (other) await raisePhoneConflict(other, actor);
       student.phone = phone;
     }
   }
@@ -288,6 +327,7 @@ async function updateStudent(actor, id, input, req) {
     const { payload } = await commitWithAudit({
       requireTransaction: true,
       mutate: async (session) => {
+        await assertStudentAccess(actor, student._id, session);
         await student.save({ session });
         return student;
       },
@@ -307,7 +347,7 @@ async function updateStudent(actor, id, input, req) {
     if (err instanceof CrmError) throw err;
     if (isDuplicate(err)) {
       const winner = await CrmStudent.findOne({ phone: student.phone }).lean();
-      if (winner && String(winner._id) !== String(student._id)) throw phoneConflict(winner);
+      if (winner && String(winner._id) !== String(student._id)) await raisePhoneConflict(winner, actor);
     }
     throw err;
   }

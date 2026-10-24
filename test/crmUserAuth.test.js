@@ -26,6 +26,10 @@ const { CRM_ACCESS_SECTION, permissionForCrmRequest } = require('../constants/cr
 const { validatePassword } = require('../services/crm/crmUserPassword');
 const { CrmError } = require('../utils/crmError');
 const { resetLoginLimiterForTests } = require('../services/crm/crmLoginLimiter');
+const { resetAuthAuditWriterForTests, setAuthAuditWriterForTests } = require('../services/crm/crmAuthAudit');
+const { sanitizeAuditValue } = require('../services/crm/auditService');
+const { REMEMBER_MS, SESSION_MS } = require('../services/crm/crmCookies');
+const { setTransactionsEnabledForTests } = require('../utils/crmMutation');
 const { syncCrmIndexes } = require('../scripts/syncCrmIndexes');
 const Admin = require('../models/Admin');
 const CrmUser = require('../models/CrmUser');
@@ -150,12 +154,16 @@ describe('CRM user authentication and access management', { timeout: 180000, con
   });
 
   after(async () => {
+    resetAuthAuditWriterForTests();
+    setTransactionsEnabledForTests(true);
     if (server) await new Promise((resolve) => server.close(resolve));
     await mongoose.disconnect();
     if (mongo) await mongo.stop();
   });
 
   beforeEach(async () => {
+    resetAuthAuditWriterForTests();
+    setTransactionsEnabledForTests(true);
     resetLoginLimiterForTests();
     process.env.CRM_LOGIN_MAX_IP = '50';
     await Promise.all([
@@ -262,10 +270,24 @@ describe('CRM user authentication and access management', { timeout: 180000, con
       body: { consultancyId: '507f1f77bcf86cd799439012', reason: 'This reason is long enough.' },
     });
     assert.equal(correction.status, 403);
+    const house = await request('POST', '/api/admin/crm/consultancies', {
+      token: superToken,
+      body: { name: 'Manager Write Desk', status: 'active' },
+    });
+    assert.equal(house.status, 201);
+    const assigned = await request('POST', `/api/admin/crm-users/${manager.data.data.user.id}/assignments`, {
+      token: superToken,
+      body: { consultancyId: house.data.data.consultancy.id },
+    });
+    assert.equal(assigned.status, 201);
     const created = await request('POST', '/api/crm/students', {
       jar: session.jar,
       csrf: session.csrf,
-      body: { fullName: 'Allowed Student', phone: nextPhone() },
+      body: {
+        fullName: 'Allowed Student',
+        phone: nextPhone(),
+        consultancyId: house.data.data.consultancy.id,
+      },
     });
     assert.equal(created.status, 201);
     const audit = await CrmStudent.findOne({ fullName: 'Allowed Student' }).lean();
@@ -288,10 +310,24 @@ describe('CRM user authentication and access management', { timeout: 180000, con
       body: { role: 'crm_manager' },
     });
     assert.equal(promoted.status, 200);
+    const house = await request('POST', '/api/admin/crm/consultancies', {
+      token: superToken,
+      body: { name: 'Promoted Write Desk', status: 'active' },
+    });
+    assert.equal(house.status, 201);
+    const assigned = await request('POST', `/api/admin/crm-users/${account.data.data.user.id}/assignments`, {
+      token: superToken,
+      body: { consultancyId: house.data.data.consultancy.id },
+    });
+    assert.equal(assigned.status, 201);
     const allowed = await request('POST', '/api/crm/students', {
       jar: session.jar,
       csrf: session.csrf,
-      body: { fullName: 'After Promotion', phone: nextPhone() },
+      body: {
+        fullName: 'After Promotion',
+        phone: nextPhone(),
+        consultancyId: house.data.data.consultancy.id,
+      },
     });
     assert.equal(allowed.status, 201);
     const deactivated = await request('POST', `/api/admin/crm-users/${account.data.data.user.id}/deactivate`, {
@@ -372,6 +408,112 @@ describe('CRM user authentication and access management', { timeout: 180000, con
     assert.equal(signedIn.status, 200);
   });
 
+  test('using one reset token invalidates every outstanding token', async () => {
+    const account = await createAccount({ email: 'reset-family@example.com' });
+    const id = account.data.data.user.id;
+    async function issue() {
+      const issued = await request('POST', `/api/admin/crm-users/${id}/reset-password`, {
+        token: superToken,
+        body: { issueToken: true },
+      });
+      assert.equal(issued.status, 200);
+      return issued.data.data.resetToken;
+    }
+
+    const expiredToken = await issue();
+    const liveToken = await issue();
+    const expiredRow = await CrmPasswordReset.findOne({ tokenHash: require('../services/crm/crmCookies').tokenHash(expiredToken) });
+    expiredRow.expiresAt = new Date(Date.now() - 1000);
+    await expiredRow.save();
+    const tooLate = await request('POST', '/api/crm-auth/reset-password', {
+      body: { token: expiredToken, password: 'Changed1234' },
+    });
+    assert.equal(tooLate.status, 400);
+    assert.equal(tooLate.data.code, 'reset_invalid');
+    assert.equal((await CrmPasswordReset.findOne({ tokenHash: require('../services/crm/crmCookies').tokenHash(liveToken) }).lean()).usedAt, null);
+    expiredRow.expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await expiredRow.save();
+
+    resetLoginLimiterForTests();
+    const first = await issue();
+    const second = await issue();
+    const updated = await request('POST', '/api/crm-auth/reset-password', {
+      body: { token: first, password: 'Changed1234' },
+    });
+    assert.equal(updated.status, 200);
+    const replay = await request('POST', '/api/crm-auth/reset-password', {
+      body: { token: first, password: 'Changed9999' },
+    });
+    assert.equal(replay.status, 400);
+    assert.equal(replay.data.code, 'reset_invalid');
+    const sibling = await request('POST', '/api/crm-auth/reset-password', {
+      body: { token: second, password: 'Changed5678' },
+    });
+    assert.equal(sibling.status, 400);
+    assert.equal(sibling.data.code, 'reset_invalid');
+    const rows = await CrmPasswordReset.find({ userId: id, purpose: 'reset' }).lean();
+    assert.ok(rows.length >= 2);
+    assert.equal(rows.every((row) => row.usedAt), true);
+    assert.equal((await login(account.email, 'Changed1234')).status, 200);
+    assert.equal((await login(account.email, 'Changed5678')).status, 401);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.reset_completed', targetUserId: id }), 1);
+
+    resetLoginLimiterForTests();
+    const left = await issue();
+    const right = await issue();
+    const [leftResult, rightResult] = await Promise.all([
+      request('POST', '/api/crm-auth/reset-password', { body: { token: left, password: 'Racing1234' } }),
+      request('POST', '/api/crm-auth/reset-password', { body: { token: right, password: 'Racing5678' } }),
+    ]);
+    assert.deepEqual([leftResult.status, rightResult.status].sort(), [200, 400]);
+    assert.equal([leftResult, rightResult].find((result) => result.status === 400).data.code, 'reset_invalid');
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.reset_completed', targetUserId: id }), 2);
+    const raced = await CrmPasswordReset.find({
+      tokenHash: {
+        $in: [left, right].map((value) => require('../services/crm/crmCookies').tokenHash(value)),
+      },
+    }).lean();
+    assert.equal(raced.length, 2);
+    assert.equal(raced.every((row) => row.usedAt), true);
+
+    resetLoginLimiterForTests();
+    const kept = await issue();
+    const other = await issue();
+    failAuthAudit();
+    try {
+      const rolled = await request('POST', '/api/crm-auth/reset-password', {
+        body: { token: kept, password: 'Rolled1234' },
+      });
+      assert.equal(rolled.status, 500);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    const pending = await CrmPasswordReset.find({
+      tokenHash: {
+        $in: [kept, other].map((value) => require('../services/crm/crmCookies').tokenHash(value)),
+      },
+    }).lean();
+    assert.equal(pending.length, 2);
+    assert.equal(pending.every((row) => row.usedAt == null), true);
+    assert.equal((await login(account.email, 'Rolled1234')).status, 401);
+
+    resetLoginLimiterForTests();
+    const displayed = await issue();
+    const direct = await request('POST', `/api/admin/crm-users/${id}/reset-password`, {
+      token: superToken,
+      body: { password: 'Direct1234' },
+    });
+    assert.equal(direct.status, 200);
+    assert.equal(direct.data.data.delivery, 'password_set');
+    assert.ok((await CrmPasswordReset.findOne({ tokenHash: require('../services/crm/crmCookies').tokenHash(displayed) }).lean()).usedAt);
+    const afterDirect = await request('POST', '/api/crm-auth/reset-password', {
+      body: { token: displayed, password: 'AfterDirect123' },
+    });
+    assert.equal(afterDirect.status, 400);
+    assert.equal(afterDirect.data.code, 'reset_invalid');
+    assert.equal((await login(account.email, 'Direct1234')).status, 200);
+  });
+
   test('account audit, filters, pagination, and the last privileged account are enforced', async () => {
     const first = await createAccount({ role: 'crm_administrator', fullName: 'Priya Nair', email: 'priya@example.com' });
     assert.equal(first.status, 201);
@@ -435,5 +577,429 @@ describe('CRM user authentication and access management', { timeout: 180000, con
     });
     assert.equal(blocked.status, 403);
     assert.equal(blocked.data.code, 'csrf_failed');
+  });
+
+  function failAuthAudit() {
+    setAuthAuditWriterForTests(async () => {
+      throw new Error('forced auth audit failure');
+    });
+  }
+
+  async function withCommitAbort(run) {
+    const original = mongoose.startSession;
+    mongoose.startSession = async function abortBeforeCommit(...args) {
+      const session = await original.apply(mongoose, args);
+      const runTransaction = session.withTransaction.bind(session);
+      session.withTransaction = (fn, options) => runTransaction(async () => {
+        await fn();
+        throw new Error('forced commit failure');
+      }, options);
+      return session;
+    };
+    try {
+      return await run();
+    } finally {
+      mongoose.startSession = original;
+    }
+  }
+
+  test('account creation commits the user and auth audit, and rolls both back', async () => {
+    const created = await createAccount({ email: 'atomic-create@example.com', username: 'atomic.create' });
+    assert.equal(created.status, 201);
+    assert.equal(created.data.success, true);
+    assert.equal(created.data.message, 'CRM account created.');
+    assert.equal(created.data.data.user.email, 'atomic-create@example.com');
+    assert.equal(await CrmUser.countDocuments({ email: 'atomic-create@example.com' }), 1);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.created', targetUserId: created.data.data.user.id }), 1);
+
+    const duplicate = await createAccount({ email: 'atomic-create@example.com', username: 'atomic.other' });
+    assert.equal(duplicate.status, 409);
+    assert.equal(duplicate.data.code, 'duplicate_account');
+    assert.equal(await CrmUser.countDocuments({ email: 'atomic-create@example.com' }), 1);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.created' }), 1);
+
+    failAuthAudit();
+    try {
+      const rolled = await createAccount({ email: 'rolled-create@example.com', username: 'rolled.create' });
+      assert.equal(rolled.status, 500);
+      assert.equal(rolled.data.success, false);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    assert.equal(await CrmUser.countDocuments({ email: 'rolled-create@example.com' }), 0);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.created', 'after.email': 'rolled-create@example.com' }), 0);
+
+    const invited = await request('POST', '/api/admin/crm-users', {
+      token: superToken,
+      body: {
+        fullName: 'Invite Atomic',
+        email: 'invite-atomic@example.com',
+        username: 'invite.atomic',
+        role: 'crm_viewer',
+        invite: true,
+      },
+    });
+    assert.equal(invited.status, 201);
+    assert.equal(invited.data.data.delivery, 'admin_display');
+    assert.equal(invited.data.data.user.status, 'invited');
+    const setupToken = invited.data.data.setupToken;
+    assert.equal(typeof setupToken, 'string');
+    const inviteAudit = await CrmAuthAuditLog.findOne({ action: 'crm_user.invited' }).lean();
+    assert.ok(inviteAudit);
+    assert.equal(JSON.stringify(inviteAudit).includes(setupToken), false);
+    assert.equal(await CrmPasswordReset.countDocuments({ userId: invited.data.data.user.id, purpose: 'invite' }), 1);
+
+    failAuthAudit();
+    try {
+      const inviteRolled = await request('POST', '/api/admin/crm-users', {
+        token: superToken,
+        body: {
+          fullName: 'Invite Rolled',
+          email: 'invite-rolled@example.com',
+          username: 'invite.rolled',
+          role: 'crm_viewer',
+          invite: true,
+        },
+      });
+      assert.equal(inviteRolled.status, 500);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    assert.equal(await CrmUser.countDocuments({ email: 'invite-rolled@example.com' }), 0);
+    assert.equal(await CrmPasswordReset.countDocuments({ purpose: 'invite', userId: { $ne: invited.data.data.user.id } }), 0);
+  });
+
+  test('account updates and deactivation commit with the auth audit or not at all', async () => {
+    const account = await createAccount({ email: 'atomic-update@example.com', role: 'crm_manager' });
+    const id = account.data.data.user.id;
+    const session = await login(account.email, account.password);
+    const updated = await request('PATCH', `/api/admin/crm-users/${id}`, {
+      token: superToken,
+      body: { fullName: 'Updated Name' },
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.data.message, 'CRM account updated.');
+    assert.equal(updated.data.data.user.fullName, 'Updated Name');
+    const updateAudit = await CrmAuthAuditLog.findOne({ action: 'crm_user.updated', targetUserId: id }).lean();
+    assert.equal(updateAudit.before.fullName, 'Asha Rao');
+    assert.equal(updateAudit.after.fullName, 'Updated Name');
+
+    const other = await createAccount({ email: 'atomic-other@example.com', username: 'atomic.other' });
+    const conflict = await request('PATCH', `/api/admin/crm-users/${id}`, {
+      token: superToken,
+      body: { email: other.email },
+    });
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.data.code, 'duplicate_account');
+    assert.equal((await CrmUser.findById(id).lean()).email, 'atomic-update@example.com');
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.updated', targetUserId: id }), 1);
+
+    failAuthAudit();
+    try {
+      const rolled = await request('PATCH', `/api/admin/crm-users/${id}`, {
+        token: superToken,
+        body: { fullName: 'Should Not Stick' },
+      });
+      assert.equal(rolled.status, 500);
+      assert.equal(rolled.data.success, false);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    assert.equal((await CrmUser.findById(id).lean()).fullName, 'Updated Name');
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.updated', 'after.fullName': 'Should Not Stick' }), 0);
+
+    const keeper = await createAccount({ role: 'crm_administrator', email: 'keeper-admin@example.com' });
+    assert.equal(keeper.status, 201);
+    const deactivated = await request('POST', `/api/admin/crm-users/${id}/deactivate`, {
+      token: superToken,
+      body: { reason: 'Left the desk.' },
+    });
+    assert.equal(deactivated.status, 200);
+    assert.equal(deactivated.data.data.user.status, 'inactive');
+    const deactivateAudit = await CrmAuthAuditLog.findOne({ action: 'crm_user.deactivated', targetUserId: id }).lean();
+    assert.equal(deactivateAudit.reason, 'Left the desk.');
+    const afterDeactivate = await request('GET', '/api/crm-auth/me', { jar: session.jar });
+    assert.equal(afterDeactivate.status, 401);
+    assert.equal(afterDeactivate.data.code, 'session_revoked');
+
+    const second = await createAccount({ email: 'still-active@example.com', role: 'crm_viewer' });
+    const secondSession = await login(second.email, second.password);
+    const versionBefore = (await CrmUser.findById(second.data.data.user.id).lean()).sessionVersion;
+    failAuthAudit();
+    try {
+      const blocked = await request('POST', `/api/admin/crm-users/${second.data.data.user.id}/deactivate`, {
+        token: superToken,
+        body: { reason: 'This deactivation must roll back.' },
+      });
+      assert.equal(blocked.status, 500);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    const stored = await CrmUser.findById(second.data.data.user.id).lean();
+    assert.equal(stored.status, 'active');
+    assert.equal(stored.sessionVersion, versionBefore);
+    assert.equal(await CrmSession.countDocuments({ userId: second.data.data.user.id, revokedAt: null }), 1);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.deactivated', targetUserId: second.data.data.user.id }), 0);
+    const stillIn = await request('GET', '/api/crm-auth/me', { jar: secondSession.jar });
+    assert.equal(stillIn.status, 200);
+  });
+
+  test('setting a password commits the hash, revocation, and audit together', async () => {
+    const account = await createAccount({ email: 'password-set@example.com' });
+    const id = account.data.data.user.id;
+    const session = await login(account.email, account.password);
+    const versionBefore = (await CrmUser.findById(id).lean()).sessionVersion;
+    failAuthAudit();
+    try {
+      const rolled = await request('POST', `/api/admin/crm-users/${id}/reset-password`, {
+        token: superToken,
+        body: { password: 'Replacement123' },
+      });
+      assert.equal(rolled.status, 500);
+      assert.equal(rolled.data.success, false);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    assert.equal((await CrmUser.findById(id).lean()).sessionVersion, versionBefore);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.password_reset', targetUserId: id }), 0);
+    assert.equal((await login(account.email, account.password)).status, 200);
+    assert.equal((await login(account.email, 'Replacement123')).status, 401);
+
+    const changed = await request('POST', `/api/admin/crm-users/${id}/reset-password`, {
+      token: superToken,
+      body: { password: 'Replacement123' },
+    });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.data.message, 'Password updated.');
+    assert.equal(changed.data.data.delivery, 'password_set');
+    assert.equal(JSON.stringify(changed.data).toLowerCase().includes('passwordhash'), false);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.password_reset', targetUserId: id }), 1);
+    const revoked = await request('GET', '/api/crm-auth/me', { jar: session.jar });
+    assert.equal(revoked.status, 401);
+    assert.equal(revoked.data.code, 'session_revoked');
+    assert.equal((await login(account.email, 'Replacement123')).status, 200);
+    const resetAudit = await CrmAuthAuditLog.findOne({ action: 'crm_user.password_reset', targetUserId: id }).lean();
+    assert.equal(JSON.stringify(resetAudit).includes('Replacement123'), false);
+  });
+
+  test('login and logout keep session state and auth audits in one transaction', async () => {
+    const account = await createAccount({ email: 'atomic-login@example.com' });
+    const id = account.data.data.user.id;
+    const signedIn = await login(account.email, account.password);
+    assert.equal(signedIn.status, 200);
+    const row = await CrmSession.findOne({ userId: id, revokedAt: null }).lean();
+    const remaining = row.expiresAt.getTime() - Date.now();
+    assert.ok(remaining <= SESSION_MS && remaining > SESSION_MS - 15000);
+    const expiry = row.expiresAt.getTime();
+    await request('GET', '/api/crm-auth/me', { jar: signedIn.jar });
+    assert.equal((await CrmSession.findById(row._id).lean()).expiresAt.getTime(), expiry);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.login_succeeded', targetUserId: id }), 1);
+    assert.equal(JSON.stringify(await CrmAuthAuditLog.find({ targetUserId: id }).lean()).includes(signedIn.jar.gx_crm_session), false);
+
+    const remembered = await login(account.email, account.password, { remember: true });
+    const rememberedRow = await CrmSession.findOne({ userId: id, remember: true, revokedAt: null }).lean();
+    const rememberedRemaining = rememberedRow.expiresAt.getTime() - Date.now();
+    assert.ok(rememberedRemaining <= REMEMBER_MS && rememberedRemaining > REMEMBER_MS - 15000);
+
+    const bad = await login(account.email, 'wrong-password-1');
+    assert.equal(bad.status, 401);
+    assert.equal(bad.data.code, 'invalid_credentials');
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.login_failed', targetUserId: id }), 1);
+    assert.equal((await CrmUser.findById(id).lean()).failedLoginCount, 1);
+    const missing = await login('missing-atomic@example.com', 'Password123');
+    assert.equal(missing.status, 401);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.login_failed', targetUserId: null }), 0);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.login_succeeded' }), 2);
+
+    const failuresBefore = (await CrmUser.findById(id).lean()).failedLoginCount;
+    failAuthAudit();
+    try {
+      const rolled = await login(account.email, 'wrong-password-1');
+      assert.equal(rolled.status, 500);
+      assert.equal(rolled.data.success, false);
+      assert.equal(rolled.jar.gx_crm_session, undefined);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    assert.equal((await CrmUser.findById(id).lean()).failedLoginCount, failuresBefore);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.login_failed', targetUserId: id }), 1);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.login_succeeded' }), 2);
+
+    const open = await CrmSession.findById(row._id).lean();
+    const sessionToken = signedIn.jar.gx_crm_session;
+    failAuthAudit();
+    try {
+      const blockedLogout = await request('POST', '/api/crm-auth/logout', {
+        jar: signedIn.jar,
+        csrf: signedIn.csrf,
+        body: {},
+      });
+      assert.equal(blockedLogout.status, 500);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    assert.equal((await CrmSession.findById(row._id).lean()).revokedAt, null);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.logout', targetUserId: id }), 0);
+    const loggedOut = await request('POST', '/api/crm-auth/logout', {
+      jar: signedIn.jar,
+      csrf: signedIn.csrf,
+      body: {},
+    });
+    assert.equal(loggedOut.status, 200);
+    assert.ok((await CrmSession.findById(open._id).lean()).revokedAt);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.logout', targetUserId: id }), 1);
+    const after = await request('GET', '/api/crm-auth/me', { jar: { gx_crm_session: sessionToken } });
+    assert.equal(after.status, 401);
+    assert.equal(after.data.code, 'session_revoked');
+  });
+
+  test('password reset completion commits the token, password, and audit together', async () => {
+    const account = await createAccount({ email: 'reset-atomic@example.com' });
+    const id = account.data.data.user.id;
+    const issued = await request('POST', `/api/admin/crm-users/${id}/reset-password`, {
+      token: superToken,
+      body: { issueToken: true },
+    });
+    assert.equal(issued.status, 200);
+    assert.equal(issued.data.data.delivery, 'admin_display');
+    const token = issued.data.data.resetToken;
+    const issuedAudit = await CrmAuthAuditLog.findOne({ action: 'crm_user.reset_issued', targetUserId: id }).lean();
+    assert.ok(issuedAudit);
+    assert.equal(JSON.stringify(issuedAudit).includes(token), false);
+    const versionBefore = (await CrmUser.findById(id).lean()).sessionVersion;
+
+    failAuthAudit();
+    try {
+      const rolled = await request('POST', '/api/crm-auth/reset-password', {
+        body: { token, password: 'Changed1234' },
+      });
+      assert.equal(rolled.status, 500);
+      assert.equal(rolled.data.success, false);
+    } finally {
+      resetAuthAuditWriterForTests();
+    }
+    const pending = await CrmPasswordReset.findOne({ userId: id }).lean();
+    assert.equal(pending.usedAt, null);
+    assert.equal((await CrmUser.findById(id).lean()).sessionVersion, versionBefore);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.reset_completed', targetUserId: id }), 0);
+    assert.equal((await login(account.email, account.password)).status, 200);
+
+    const [first, second] = await Promise.all([
+      request('POST', '/api/crm-auth/reset-password', { body: { token, password: 'Changed1234' } }),
+      request('POST', '/api/crm-auth/reset-password', { body: { token, password: 'Changed5678' } }),
+    ]);
+    assert.deepEqual([first.status, second.status].sort(), [200, 400]);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.reset_completed', targetUserId: id }), 1);
+    assert.ok((await CrmPasswordReset.findOne({ userId: id }).lean()).usedAt);
+    const oldPassword = await login(account.email, account.password);
+    assert.equal(oldPassword.status, 401);
+    const outcomes = await Promise.all([
+      login(account.email, 'Changed1234'),
+      login(account.email, 'Changed5678'),
+    ]);
+    assert.deepEqual(outcomes.map((item) => item.status).sort(), [200, 401]);
+    const completed = await CrmAuthAuditLog.findOne({ action: 'crm_user.reset_completed', targetUserId: id }).lean();
+    const completedText = JSON.stringify(completed);
+    assert.equal(completedText.includes(token), false);
+    assert.equal(completedText.includes('Changed1234'), false);
+    assert.equal(completedText.includes('Changed5678'), false);
+  });
+
+  test('a commit abort and unavailable transactions leave account state unchanged', async () => {
+    const aborted = await withCommitAbort(() => createAccount({ email: 'abort-create@example.com', username: 'abort.create' }));
+    assert.equal(aborted.status, 500);
+    assert.equal(aborted.data.success, false);
+    assert.equal(await CrmUser.countDocuments({ email: 'abort-create@example.com' }), 0);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.created', 'after.email': 'abort-create@example.com' }), 0);
+    const recovered = await createAccount({ email: 'abort-create@example.com', username: 'abort.create' });
+    assert.equal(recovered.status, 201);
+
+    const account = await createAccount({ email: 'unavailable-auth@example.com', role: 'crm_viewer' });
+    const id = account.data.data.user.id;
+    const session = await login(account.email, account.password);
+    const issued = await request('POST', `/api/admin/crm-users/${id}/reset-password`, {
+      token: superToken,
+      body: { issueToken: true },
+    });
+    const token = issued.data.data.resetToken;
+    const before = await CrmUser.findById(id).lean();
+    setTransactionsEnabledForTests(false);
+    try {
+      const blockedCreate = await createAccount({ email: 'unavailable-new@example.com' });
+      assert.equal(blockedCreate.status, 503);
+      assert.equal(blockedCreate.data.code, 'transaction_required');
+      const blockedUpdate = await request('PATCH', `/api/admin/crm-users/${id}`, {
+        token: superToken,
+        body: { fullName: 'Unavailable Name' },
+      });
+      assert.equal(blockedUpdate.status, 503);
+      assert.equal(blockedUpdate.data.code, 'transaction_required');
+      const blockedDeactivate = await request('POST', `/api/admin/crm-users/${id}/deactivate`, {
+        token: superToken,
+        body: { reason: 'Transactions are unavailable.' },
+      });
+      assert.equal(blockedDeactivate.status, 503);
+      const blockedPassword = await request('POST', `/api/admin/crm-users/${id}/reset-password`, {
+        token: superToken,
+        body: { password: 'Unavailable123' },
+      });
+      assert.equal(blockedPassword.status, 503);
+      assert.equal(blockedPassword.data.code, 'transaction_required');
+      const blockedLogin = await login(account.email, account.password);
+      assert.equal(blockedLogin.status, 503);
+      assert.equal(blockedLogin.data.code, 'transaction_required');
+      const blockedLogout = await request('POST', '/api/crm-auth/logout', {
+        jar: session.jar,
+        csrf: session.csrf,
+        body: {},
+      });
+      assert.equal(blockedLogout.status, 503);
+      assert.equal(blockedLogout.data.code, 'transaction_required');
+      const blockedReset = await request('POST', '/api/crm-auth/reset-password', {
+        body: { token, password: 'Unavailable123' },
+      });
+      assert.equal(blockedReset.status, 503);
+      assert.equal(blockedReset.data.code, 'transaction_required');
+      const unknown = await login('nobody-unavailable@example.com', 'Password123');
+      assert.equal(unknown.status, 401);
+      assert.equal(unknown.data.code, 'invalid_credentials');
+    } finally {
+      setTransactionsEnabledForTests(true);
+    }
+    const stored = await CrmUser.findById(id).lean();
+    assert.equal(stored.fullName, before.fullName);
+    assert.equal(stored.status, 'active');
+    assert.equal(stored.sessionVersion, before.sessionVersion);
+    assert.equal(stored.failedLoginCount, before.failedLoginCount);
+    assert.equal(await CrmUser.countDocuments({ email: 'unavailable-new@example.com' }), 0);
+    assert.equal(await CrmSession.countDocuments({ userId: id, revokedAt: null }), 1);
+    assert.equal((await CrmPasswordReset.findOne({ userId: id, purpose: 'reset' }).lean()).usedAt, null);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.deactivated', targetUserId: id }), 0);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.password_reset', targetUserId: id }), 0);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_user.reset_completed', targetUserId: id }), 0);
+    const stillIn = await request('GET', '/api/crm-auth/me', { jar: session.jar });
+    assert.equal(stillIn.status, 200);
+    assert.equal((await login(account.email, account.password)).status, 200);
+  });
+
+  test('auth audit metadata redacts passwords, reset tokens, and session secrets', async () => {
+    const cleaned = sanitizeAuditValue({
+      password: 'Secret1234',
+      passwordHash: 'hash',
+      resetToken: 'reset-secret',
+      setupToken: 'setup-secret',
+      sessionToken: 'session-secret',
+      csrfToken: 'csrf-secret',
+      remember: false,
+      status: 'active',
+    });
+    assert.deepEqual(cleaned, { remember: false, status: 'active' });
+    const account = await createAccount({ email: 'redaction@example.com', password: 'VisiblePass123' });
+    const signedIn = await login(account.email, 'VisiblePass123');
+    const text = JSON.stringify(await CrmAuthAuditLog.find({ targetUserId: account.data.data.user.id }).lean());
+    assert.equal(text.includes('VisiblePass123'), false);
+    assert.equal(text.includes('passwordHash'), false);
+    assert.equal(text.includes(signedIn.jar.gx_crm_session), false);
+    assert.equal(text.includes(signedIn.csrf), false);
   });
 });

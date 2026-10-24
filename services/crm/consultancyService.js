@@ -8,6 +8,9 @@ const { isMongoDuplicateKeyError } = require('../../utils/mongoDuplicateKey');
 const { escapeRegex, parseObjectId, parsePageLimit, optionalQueryString } = require('../../utils/crmHttp');
 const { commitWithAudit } = require('../../utils/crmMutation');
 const { writeAudit } = require('./auditService');
+const { writeAuthAudit } = require('./crmAuthAudit');
+const { insertActiveAssignment } = require('./crmAssignmentService');
+const { assertConsultancyAccess, assignedConsultancyIds, isCrmActor } = require('./crmAccess');
 const {
   requireText,
   optionalText,
@@ -21,25 +24,12 @@ const {
   CONSULTANCY_STATUS,
   CONTACT_STATUS,
 } = require('./fields');
-const { CONSULTANCY_PIPELINE } = require('../../constants/crm');
-
-function pipelineStageOf(value) {
-  return CONSULTANCY_PIPELINE.includes(value) ? value : 'fresh';
-}
-
-function readPipelineStage(value) {
-  if (!CONSULTANCY_PIPELINE.includes(value)) {
-    throw new CrmError(400, 'Pipeline stage must be fresh, contacted, meeting done, or onboarded.', 'invalid_body');
-  }
-  return value;
-}
 
 function consultancyDTO(doc) {
   return {
     id: String(doc._id),
     name: doc.name,
     status: doc.status,
-    pipelineStage: pipelineStageOf(doc.pipelineStage),
     notes: doc.notes || '',
     createdBy: doc.createdBy ? String(doc.createdBy) : null,
     updatedBy: doc.updatedBy ? String(doc.updatedBy) : null,
@@ -91,31 +81,17 @@ function publicFields(dto) {
   return {
     name: dto.name,
     status: dto.status,
-    pipelineStage: dto.pipelineStage,
     notes: dto.notes,
   };
 }
 
-async function countPipeline(filter) {
-  const rows = await CrmConsultancy.aggregate([
-    { $match: filter },
-    { $group: { _id: { $ifNull: ['$pipelineStage', 'fresh'] }, count: { $sum: 1 } } },
-  ]);
-  const pipeline = { total: 0, fresh: 0, contacted: 0, meeting_done: 0, onboarded: 0 };
-  rows.forEach((row) => {
-    const key = pipelineStageOf(row._id);
-    pipeline[key] += row.count;
-    pipeline.total += row.count;
-  });
-  return pipeline;
-}
-
-async function listConsultancies(query) {
+async function listConsultancies(query, actor) {
   const { page, limit, skip } = parsePageLimit(query);
   const q = optionalQueryString(query.q, 'q');
   const status = optionalQueryString(query.status, 'status');
-  const pipelineStage = optionalQueryString(query.pipelineStage, 'pipelineStage');
   const filter = { deletedAt: null };
+  const allowedIds = await assignedConsultancyIds(actor);
+  if (allowedIds) filter._id = { $in: allowedIds };
   if (status) {
     if (!CONSULTANCY_STATUS.includes(status)) {
       throw new CrmError(400, 'status must be active or inactive.', 'invalid_query');
@@ -125,35 +101,17 @@ async function listConsultancies(query) {
   if (q) {
     filter.name = new RegExp(escapeRegex(q), 'i');
   }
-  const pipeline = await countPipeline(filter);
-  if (pipelineStage) {
-    if (!CONSULTANCY_PIPELINE.includes(pipelineStage)) {
-      throw new CrmError(400, 'pipelineStage must be fresh, contacted, meeting_done, or onboarded.', 'invalid_query');
-    }
-    if (pipelineStage === 'fresh') {
-      filter.$or = [
-        { pipelineStage: 'fresh' },
-        { pipelineStage: { $exists: false } },
-        { pipelineStage: null },
-      ];
-    } else {
-      filter.pipelineStage = pipelineStage;
-    }
-  }
   const [items, total] = await Promise.all([
     CrmConsultancy.find(filter).sort({ name: 1 }).skip(skip).limit(limit).lean(),
     CrmConsultancy.countDocuments(filter),
   ]);
-  return { items: await presentConsultancies(items), page, limit, total, pipeline };
+  return { items: await presentConsultancies(items), page, limit, total };
 }
 
 async function createConsultancy(actor, body, meta) {
   const name = requireText(body && body.name, 'Name', 2, 200);
   const notes = optionalText(body && body.notes, 'Notes', 2000);
   const status = optionalStatus(body && body.status, CONSULTANCY_STATUS, 'Status', 'active');
-  const pipelineStage = body && Object.prototype.hasOwnProperty.call(body, 'pipelineStage') && body.pipelineStage !== ''
-    ? readPipelineStage(body.pipelineStage)
-    : 'fresh';
   const normalizedName = normalizeConsultancyName(name);
   const adminId = actorId(actor);
 
@@ -163,8 +121,18 @@ async function createConsultancy(actor, body, meta) {
     status: 'active',
   }).lean();
   if (existing && status === 'active') {
+    let visible = null;
+    if (!isCrmActor(actor)) visible = await presentConsultancy(existing);
+    else {
+      try {
+        await assertConsultancyAccess(actor, existing._id);
+        visible = await presentConsultancy(existing);
+      } catch (err) {
+        if (!(err instanceof CrmError) || err.code !== 'not_found') throw err;
+      }
+    }
     throw new CrmError(409, 'An active consultancy with this name already exists.', 'duplicate_consultancy', {
-      consultancy: await presentConsultancy(existing),
+      consultancy: visible,
     });
   }
 
@@ -178,7 +146,6 @@ async function createConsultancy(actor, body, meta) {
               name,
               normalizedName,
               status,
-              pipelineStage,
               notes,
               createdBy: adminId,
               updatedBy: adminId,
@@ -187,7 +154,16 @@ async function createConsultancy(actor, body, meta) {
           ],
           { session }
         );
-        return created[0];
+        const doc = created[0];
+        if (isCrmActor(actor)) {
+          await insertActiveAssignment({
+            consultancyId: doc._id,
+            crmUserId: actor._id,
+            createdByCrmUserId: actor._id,
+            revokedAt: null,
+          }, session);
+        }
+        return doc;
       },
       audit: async (session, doc) => {
         const dto = consultancyDTO(doc);
@@ -204,6 +180,14 @@ async function createConsultancy(actor, body, meta) {
           },
           session
         );
+        if (isCrmActor(actor)) {
+          await writeAuthAudit({
+            actorCrmUserId: actor._id,
+            targetUserId: actor._id,
+            action: 'crm_assignment.created',
+            after: { consultancyId: String(doc._id), status: 'active' },
+          }, meta, session);
+        }
       },
     });
     return presentConsultancy(payload);
@@ -214,16 +198,27 @@ async function createConsultancy(actor, body, meta) {
         deletedAt: null,
         status: 'active',
       }).lean();
+      let visible = null;
+      if (again && !isCrmActor(actor)) visible = await presentConsultancy(again);
+      else if (again) {
+        try {
+          await assertConsultancyAccess(actor, again._id);
+          visible = await presentConsultancy(again);
+        } catch (accessError) {
+          if (!(accessError instanceof CrmError) || accessError.code !== 'not_found') throw accessError;
+        }
+      }
       throw new CrmError(409, 'An active consultancy with this name already exists.', 'duplicate_consultancy', {
-        consultancy: again ? await presentConsultancy(again) : null,
+        consultancy: visible,
       });
     }
     throw err;
   }
 }
 
-async function getConsultancy(id) {
+async function getConsultancy(id, actor) {
   const consultancyId = parseObjectId(id, 'Consultancy id');
+  await assertConsultancyAccess(actor, consultancyId);
   const doc = await CrmConsultancy.findOne({ _id: consultancyId, deletedAt: null }).lean();
   if (!doc) throw new CrmError(404, 'Consultancy not found.', 'not_found');
   return presentConsultancy(doc);
@@ -231,6 +226,7 @@ async function getConsultancy(id) {
 
 async function updateConsultancy(actor, id, body, meta) {
   const consultancyId = parseObjectId(id, 'Consultancy id');
+  await assertConsultancyAccess(actor, consultancyId);
   const adminId = actorId(actor);
   const doc = await CrmConsultancy.findOne({ _id: consultancyId, deletedAt: null });
   if (!doc) throw new CrmError(404, 'Consultancy not found.', 'not_found');
@@ -246,9 +242,6 @@ async function updateConsultancy(actor, id, body, meta) {
   if (body && Object.prototype.hasOwnProperty.call(body, 'status')) {
     doc.status = requireStatus(body.status, CONSULTANCY_STATUS, 'Status');
   }
-  if (body && Object.prototype.hasOwnProperty.call(body, 'pipelineStage')) {
-    doc.pipelineStage = readPipelineStage(body.pipelineStage);
-  }
   doc.updatedBy = adminId;
   const after = publicFields(consultancyDTO(doc));
 
@@ -256,6 +249,7 @@ async function updateConsultancy(actor, id, body, meta) {
     const { payload } = await commitWithAudit({
       requireTransaction: true,
       mutate: async (session) => {
+        await assertConsultancyAccess(actor, doc._id, session);
         await doc.save({ session });
         return doc;
       },
@@ -324,8 +318,9 @@ function assertContactReachable(phone, email) {
   }
 }
 
-async function listContacts(consultancyIdParam, query) {
+async function listContacts(consultancyIdParam, query, actor) {
   const consultancyId = parseObjectId(consultancyIdParam, 'Consultancy id');
+  await assertConsultancyAccess(actor, consultancyId);
   await loadEligibleConsultancy(consultancyId, { requireActive: false });
   const { page, limit, skip } = parsePageLimit(query);
   const filter = { consultancyId };
@@ -338,6 +333,7 @@ async function listContacts(consultancyIdParam, query) {
 
 async function createContact(actor, consultancyIdParam, body, meta) {
   const consultancyId = parseObjectId(consultancyIdParam, 'Consultancy id');
+  await assertConsultancyAccess(actor, consultancyId);
   const consultancy = await loadEligibleConsultancy(consultancyId, { requireActive: false });
   const fields = parseContactBody(body, { partial: false });
   if (!Object.prototype.hasOwnProperty.call(fields, 'status')) fields.status = 'active';
@@ -348,6 +344,7 @@ async function createContact(actor, consultancyIdParam, body, meta) {
     const { payload } = await commitWithAudit({
       requireTransaction: true,
       mutate: async (session) => {
+        await assertConsultancyAccess(actor, consultancy._id, session);
         const created = await CrmConsultancyContact.create(
           [
             {
@@ -413,6 +410,7 @@ async function findContactForConsultancy(consultancyId, contactIdParam) {
 
 async function updateContact(actor, consultancyIdParam, contactIdParam, body, meta) {
   const consultancyId = parseObjectId(consultancyIdParam, 'Consultancy id');
+  await assertConsultancyAccess(actor, consultancyId);
   await loadEligibleConsultancy(consultancyId, { requireActive: false });
   const doc = await findContactForConsultancy(consultancyId, contactIdParam);
   const fields = parseContactBody(body, { partial: true });
@@ -460,6 +458,7 @@ async function updateContact(actor, consultancyIdParam, contactIdParam, body, me
     const { payload } = await commitWithAudit({
       requireTransaction: true,
       mutate: async (session) => {
+        await assertConsultancyAccess(actor, consultancyId, session);
         await doc.save({ session });
         return doc;
       },
@@ -494,6 +493,7 @@ async function updateContact(actor, consultancyIdParam, contactIdParam, body, me
 
 async function deactivateContact(actor, consultancyIdParam, contactIdParam, meta) {
   const consultancyId = parseObjectId(consultancyIdParam, 'Consultancy id');
+  await assertConsultancyAccess(actor, consultancyId);
   await loadEligibleConsultancy(consultancyId, { requireActive: false });
   const doc = await findContactForConsultancy(consultancyId, contactIdParam);
   if (doc.status === 'inactive') {

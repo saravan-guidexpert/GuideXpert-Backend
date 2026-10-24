@@ -4,7 +4,26 @@ const CrmAuthAuditLog = require('../../models/CrmAuthAuditLog');
 const { sanitizeAuditValue } = require('./auditService');
 const { requestMeta } = require('../../utils/crmHttp');
 
-async function writeAuthAudit(entry, req) {
+async function insertAuthAuditDocument(doc, session) {
+  const created = await CrmAuthAuditLog.create([doc], session ? { session } : undefined);
+  return created[0];
+}
+
+let writeAuthAuditDocument = insertAuthAuditDocument;
+
+function setAuthAuditWriterForTests(writer) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('CRM test auth audit writer is refused in production.');
+  }
+  writeAuthAuditDocument = writer || insertAuthAuditDocument;
+}
+
+function resetAuthAuditWriterForTests() {
+  if (process.env.NODE_ENV === 'production') return;
+  writeAuthAuditDocument = insertAuthAuditDocument;
+}
+
+async function writeAuthAudit(entry, req, session) {
   const meta = requestMeta(req);
   const doc = {
     actorAdminId: entry.actorAdminId || null,
@@ -17,8 +36,7 @@ async function writeAuthAudit(entry, req) {
     ip: meta.ip,
     userAgent: meta.userAgent,
   };
-  const created = await CrmAuthAuditLog.create(doc);
-  return created;
+  return writeAuthAuditDocument(doc, session);
 }
 
 function accountSnapshot(user) {
@@ -36,4 +54,6 @@ function accountSnapshot(user) {
 module.exports = {
   writeAuthAudit,
   accountSnapshot,
+  setAuthAuditWriterForTests,
+  resetAuthAuditWriterForTests,
 };

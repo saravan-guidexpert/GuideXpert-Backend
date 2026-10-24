@@ -118,9 +118,14 @@ function permissionForCrmRequest(method, originalUrl) {
     ['DELETE', /^\/consultancies\/[a-f\d]{24}$/i, 'crm.consultancies.update'],
     ['GET', /^\/consultancies\/[a-f\d]{24}$/i, 'crm.consultancies.read'],
     ['POST', /^\/consultancies$/i, 'crm.consultancies.create'],
+    ['GET', /^\/consultancies\/overview$/i, 'crm.consultancies.read'],
     ['GET', /^\/consultancies$/i, 'crm.consultancies.read'],
+    ['GET', /^\/operations$/i, 'crm.analytics.read'],
     ['GET', /^\/analytics$/i, 'crm.analytics.read'],
     ['GET', /^\/calendar$/i, 'crm.calendar.read'],
+    ['GET', /^\/activity\/summary$/i, 'crm.audit.read'],
+    ['GET', /^\/activity$/i, 'crm.audit.read'],
+    ['GET', /^\/activity\/(business|security)\/[a-f\d]{24}$/i, 'crm.audit.read'],
     ['GET', /^\/audits$/i, 'crm.audit.read'],
   ];
   const found = rules.find((rule) => rule[0] === verb && rule[1].test(relative));

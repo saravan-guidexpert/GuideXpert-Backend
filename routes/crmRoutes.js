@@ -30,6 +30,7 @@ const students = require('../controllers/crmStudentController');
 const router = express.Router();
 
 router.get('/consultancies', consultancy.listConsultancies);
+router.get('/consultancies/overview', students.consultancyOverview);
 router.post('/consultancies', consultancy.createConsultancy);
 router.get('/consultancies/:id/contacts', consultancy.listContacts);
 router.post('/consultancies/:id/contacts', consultancy.createContact);
@@ -46,6 +47,10 @@ router.get('/students/:id', students.getStudent);
 router.patch('/students/:id', students.updateStudent);
 
 router.get('/audits', students.listAudits);
+router.get('/activity/summary', students.activitySummary);
+router.get('/activity', students.listActivity);
+router.get('/activity/:source/:id', students.getActivity);
+router.get('/operations', students.operations);
 router.get('/analytics', students.getAnalytics);
 router.get('/calendar', students.getCalendar);
 router.get('/referrals', students.listReferrals);

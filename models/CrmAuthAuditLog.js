@@ -18,5 +18,7 @@ const crmAuthAuditLogSchema = new mongoose.Schema(
 );
 
 crmAuthAuditLogSchema.index({ targetUserId: 1, createdAt: -1 });
+// Activity pages sort security events by time. The target-user index does not serve that sort.
+crmAuthAuditLogSchema.index({ createdAt: -1, _id: -1 });
 
 module.exports = mongoose.model('CrmAuthAuditLog', crmAuthAuditLogSchema);
