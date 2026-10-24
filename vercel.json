@@ -51,10 +51,6 @@
     {
       "path": "/api/cron/process-chatbot-inbound",
       "schedule": "*/1 * * * *"
-    },
-    {
-      "path": "/api/cron/send-jee-mock-test-once",
-      "schedule": "*/1 * * * *"
     }
   ]
 }
