@@ -8,6 +8,7 @@ if (fs.existsSync(gupshupLocalEnv)) {
 const express = require('express');
 const cors = require('cors');
 const connectDB = require('./config/db');
+const { ensureLocalCrmTestUser } = require('./services/crm/ensureLocalCrmTestUser');
 const { logDbError, isTransientMongoError, publicClientMessage } = require('./utils/mongoRetry');
 const formRoutes = require('./routes/formRoutes');
 const assessmentRoutes = require('./routes/assessmentRoutes');
@@ -68,6 +69,14 @@ const { getPosterDownloads, getPosterDownloadStats } = require('./controllers/po
 const { getCollegeComparisons } = require('./controllers/collegeComparisonAdminController');
 const { checkPosterEligibility, trackPosterDownload } = require('./controllers/posterController');
 const requireAdmin = require('./middleware/requireAdmin');
+const requireAdminSection = require('./middleware/requireAdminSection');
+const crmRoutes = require('./routes/crmRoutes');
+const crmAuthRoutes = require('./routes/crmAuthRoutes');
+const { adminCrmUserRoutes, portalCrmUserRoutes } = require('./routes/crmUserAdminRoutes');
+const { requireCrmSession } = require('./middleware/requireCrmSession');
+const crmPortalGate = require('./middleware/crmPortalGate');
+const { CRM_SECTION_KEY } = require('./constants/crm');
+const { CRM_ACCESS_SECTION } = require('./constants/crmUsers');
 const {
   getWhatsAppConfigStatus,
   logWhatsAppConfigWarnings,
@@ -142,7 +151,7 @@ const corsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CRM-CSRF'],
   optionsSuccessStatus: 204,
 };
 app.use(cors(corsOptions));
@@ -237,6 +246,23 @@ app.use('/api/admin/whatsapp-chat', requireAdmin, whatsappChatAdminRoutes);
 app.use('/api/admin/ai-calls', requireAdmin, aiCallsAdminRoutes);
 app.use('/api/admin/lead-insights', requireAdmin, leadInsightsRoutes);
 app.use('/api/admin/analytics', requireAdmin, analyticsExecutiveRoutes);
+// /crm in the browser stays on the demo store. /api/admin/crm stays on the admin JWT.
+// /api/crm-auth and /api/crm are the separate CRM-user session and do not grant admin access.
+app.use('/api/crm-auth', crmAuthRoutes);
+app.use('/api/crm/users', requireCrmSession, portalCrmUserRoutes);
+app.use('/api/crm', requireCrmSession, crmPortalGate, crmRoutes);
+app.use(
+  '/api/admin/crm-users',
+  requireAdmin,
+  requireAdminSection(CRM_ACCESS_SECTION, 'CRM access management is required.'),
+  adminCrmUserRoutes
+);
+app.use(
+  '/api/admin/crm',
+  requireAdmin,
+  requireAdminSection(CRM_SECTION_KEY, 'Consultancy CRM access is required.'),
+  crmRoutes
+);
 app.use('/api/admin', adminRoutes);
 app.use('/api/resources', require('./routes/resourceRoutes'));
 app.get('/api/student-workspace-updates', require('./controllers/studentWorkspaceUpdateController').publicList);
@@ -291,8 +317,9 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
   try {
     await connectDB();
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+    await ensureLocalCrmTestUser();
+    const server = app.listen(PORT, '127.0.0.1', () => {
+      console.log(`Server running on http://127.0.0.1:${PORT}`);
       console.log(`MongoDB connection established. Server ready to accept requests.`);
 
       if (String(process.env.DEV_IIT_CRON_LOOP || '').trim() === '1') {
@@ -345,6 +372,10 @@ const startServer = async () => {
           );
         }, tickMs);
       }
+    });
+    server.on('error', (error) => {
+      console.error(`Failed to listen on 127.0.0.1:${PORT}:`, error.message);
+      process.exit(1);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
