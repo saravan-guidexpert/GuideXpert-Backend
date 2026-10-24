@@ -20,6 +20,7 @@ function handle(res, err, label) {
 }
 
 function actorId(req) {
+  if (req.crmUser) return { _id: req.crmUser._id, actorType: 'crm-user' };
   return req.admin._id;
 }
 

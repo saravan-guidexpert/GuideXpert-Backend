@@ -533,7 +533,19 @@ describe('consultancy CRM phase 1', { timeout: 180000 }, () => {
   test('consultancies, contacts, search, and pagination', async () => {
     const created = await createConsultancy(staffToken, 'Horizon Consultants');
     assert.equal(created.status, 201);
+    assert.equal(created.data.data.consultancy.pipelineStage, 'fresh');
     const id = created.data.data.consultancy.id;
+    const staged = await api('PATCH', `/api/admin/crm/consultancies/${id}`, {
+      token: staffToken,
+      body: { pipelineStage: 'contacted' },
+    });
+    assert.equal(staged.status, 200);
+    assert.equal(staged.data.data.consultancy.pipelineStage, 'contacted');
+    const invalidStage = await api('PATCH', `/api/admin/crm/consultancies/${id}`, {
+      token: staffToken,
+      body: { pipelineStage: 'hot' },
+    });
+    assert.equal(invalidStage.status, 400);
     const duplicate = await createConsultancy(staffToken, '  horizon   consultants ');
     assert.equal(duplicate.status, 409);
 
@@ -582,6 +594,14 @@ describe('consultancy CRM phase 1', { timeout: 180000 }, () => {
     assert.equal(listed.status, 200);
     assert.equal(listed.data.data.total, 1);
     assert.equal(listed.data.data.items.length, 1);
+    assert.equal(listed.data.data.items[0].pipelineStage, 'contacted');
+    assert.ok(listed.data.data.pipeline.contacted >= 1);
+    const freshOnly = await api('GET', '/api/admin/crm/consultancies?page=1&limit=20&pipelineStage=fresh', {
+      token: staffToken,
+    });
+    assert.equal(freshOnly.status, 200);
+    assert.equal(freshOnly.data.data.items.some((row) => row.id === id), false);
+    assert.ok(freshOnly.data.data.pipeline.total >= freshOnly.data.data.pipeline.fresh);
 
     const literal = await api('GET', '/api/admin/crm/consultancies?page=1&limit=20&q=' + encodeURIComponent('.*'), {
       token: staffToken,

@@ -9,6 +9,12 @@ function actorId(actor) {
   return actor;
 }
 
+function auditActor(actor) {
+  const id = actorId(actor);
+  if (actor && actor.actorType === 'crm-user') return { actorCrmUserId: id };
+  return { actorAdminId: id };
+}
+
 function requireText(value, label, min, max) {
   if (typeof value !== 'string') {
     throw new CrmError(400, `${label} is required.`, 'invalid_body');
@@ -68,6 +74,7 @@ function normalizeConsultancyName(name) {
 
 module.exports = {
   actorId,
+  auditActor,
   requireText,
   optionalText,
   optionalContactEmail,

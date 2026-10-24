@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const CrmAuditLog = require('../../models/CrmAuditLog');
+const { parsePageLimit } = require('../../utils/crmHttp');
 
 const SECRET_KEY = /password|token|otp|secret|authorization|mongodb|connection/i;
 
@@ -41,7 +42,6 @@ function setAuditWriterForTests(writer) {
 
 async function writeAudit(entry, session) {
   const doc = {
-    actorAdminId: entry.actorAdminId,
     action: entry.action,
     entityType: entry.entityType,
     entityId: entry.entityId,
@@ -51,6 +51,8 @@ async function writeAudit(entry, session) {
     ip: entry.ip || null,
     userAgent: entry.userAgent || null,
   };
+  if (entry.actorAdminId) doc.actorAdminId = entry.actorAdminId;
+  if (entry.actorCrmUserId) doc.actorCrmUserId = entry.actorCrmUserId;
   return insertAuditDocument(doc, session);
 }
 
@@ -63,8 +65,34 @@ function resetAuditWriterForTests() {
   };
 }
 
+async function listAudits(query) {
+  const { page, limit, skip } = parsePageLimit(query);
+  const [rows, total] = await Promise.all([
+    CrmAuditLog.find({}).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
+    CrmAuditLog.countDocuments({}),
+  ]);
+  return {
+    items: rows.map((row) => ({
+      id: String(row._id),
+      actorAdminId: row.actorAdminId ? String(row.actorAdminId) : null,
+      actorCrmUserId: row.actorCrmUserId ? String(row.actorCrmUserId) : null,
+      action: row.action,
+      entityType: row.entityType,
+      entityId: String(row.entityId),
+      reason: row.reason || '',
+      before: row.before || null,
+      after: row.after || null,
+      createdAt: row.createdAt,
+    })),
+    page,
+    limit,
+    total,
+  };
+}
+
 module.exports = {
   writeAudit,
+  listAudits,
   sanitizeAuditValue,
   setAuditWriterForTests,
   resetAuditWriterForTests,

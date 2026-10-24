@@ -13,6 +13,7 @@ const CRM_PERMISSION_KEYS = [CRM_SECTION, CRM_MANAGER_SECTION];
 
 const CONSULTANCY_STATUS = ['active', 'inactive'];
 const CONTACT_STATUS = ['active', 'inactive'];
+const CONSULTANCY_PIPELINE = ['fresh', 'contacted', 'meeting_done', 'onboarded'];
 
 const CRM_PAGE_MAX_LIMIT = 100;
 const CRM_ANALYTICS_MAX_DAYS = 3660;
@@ -51,6 +52,7 @@ module.exports = {
   CRM_PERMISSION_KEYS,
   CONSULTANCY_STATUS,
   CONTACT_STATUS,
+  CONSULTANCY_PIPELINE,
   CRM_PAGE_MAX_LIMIT,
   CRM_ANALYTICS_MAX_DAYS,
   CRM_CALENDAR_MAX_DAYS,

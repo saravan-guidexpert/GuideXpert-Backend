@@ -47,6 +47,10 @@ function crmModels() {
     require('../models/CrmStudent'),
     require('../models/CrmReferral'),
     require('../models/CrmAuditLog'),
+    require('../models/CrmUser'),
+    require('../models/CrmSession'),
+    require('../models/CrmPasswordReset'),
+    require('../models/CrmAuthAuditLog'),
   ];
 }
 

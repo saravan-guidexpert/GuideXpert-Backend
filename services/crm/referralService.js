@@ -10,7 +10,7 @@ const { commitWithAudit } = require('../../utils/crmMutation');
 const { parsePageLimit, parseObjectId, requestMeta } = require('../../utils/crmHttp');
 const { resolveListRange } = require('../../utils/crmRange');
 const { writeAudit } = require('./auditService');
-const { actorId } = require('./fields');
+const { actorId, auditActor } = require('./fields');
 const { ADMISSION_STATUSES, CRM_REASON_MIN, CRM_REASON_MAX } = require('../../constants/crm');
 
 function toReferral(doc, extras = {}) {
@@ -145,7 +145,7 @@ async function createReferral(actor, input, req) {
         return created[0];
       },
       audit: (session, referral) => writeAudit({
-        actorAdminId: adminId,
+        ...auditActor(actor),
         action: 'referral.created',
         entityType: 'crmReferral',
         entityId: referral._id,
@@ -247,7 +247,7 @@ async function correctReferralSource(actor, referralId, input, req) {
       return updated;
     },
     audit: (session, updated) => writeAudit({
-      actorAdminId: adminId,
+      ...auditActor(actor),
       action: 'referral.source_corrected',
       entityType: 'crmReferral',
       entityId: updated._id,

@@ -22,6 +22,7 @@ function handle(res, err, label) {
 }
 
 function actorId(req) {
+  if (req.crmUser) return { _id: req.crmUser._id, actorType: 'crm-user' };
   return req.admin._id;
 }
 
@@ -124,5 +125,15 @@ exports.correctReferralSource = async (req, res) => {
     return send(res, 200, { success: true, message: 'Referral source corrected.', data: { referral } });
   } catch (err) {
     return handle(res, err, '[crm] correct referral source');
+  }
+};
+
+exports.listAudits = async (req, res) => {
+  try {
+    const auditService = require('../services/crm/auditService');
+    const data = await auditService.listAudits(req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] list audits');
   }
 };

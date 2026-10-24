@@ -9,7 +9,7 @@ const { normalizeIndianMobile } = require('../../utils/crmPhone');
 const { escapeRegex, parseObjectId, parsePageLimit, requestMeta } = require('../../utils/crmHttp');
 const { ADMISSION_STATUSES } = require('../../constants/crm');
 const { writeAudit } = require('./auditService');
-const { actorId, requireText, optionalText, optionalEmail } = require('./fields');
+const { actorId, auditActor, requireText, optionalText, optionalEmail } = require('./fields');
 const { planNewReferral, sourceSnapshot, toReferral } = require('./referralService');
 
 function admissionStatusList() {
@@ -137,7 +137,7 @@ async function createStudent(actor, input, req) {
           return created[0];
         },
         audit: (session, student) => writeAudit({
-          actorAdminId: adminId,
+          ...auditActor(actor),
           action: 'student.created',
           entityType: 'crmStudent',
           entityId: student._id,
@@ -160,7 +160,7 @@ async function createStudent(actor, input, req) {
       },
       audit: async (session, created) => {
         await writeAudit({
-          actorAdminId: adminId,
+          ...auditActor(actor),
           action: 'student.created',
           entityType: 'crmStudent',
           entityId: created.student._id,
@@ -170,7 +170,7 @@ async function createStudent(actor, input, req) {
           userAgent: meta.userAgent,
         }, session);
         await writeAudit({
-          actorAdminId: adminId,
+          ...auditActor(actor),
           action: 'referral.created',
           entityType: 'crmReferral',
           entityId: created.referral._id,
@@ -292,7 +292,7 @@ async function updateStudent(actor, id, input, req) {
         return student;
       },
       audit: (session) => writeAudit({
-        actorAdminId: adminId,
+        ...auditActor(actor),
         action: 'student.updated',
         entityType: 'crmStudent',
         entityId: student._id,

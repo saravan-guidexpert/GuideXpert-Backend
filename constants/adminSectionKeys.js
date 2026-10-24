@@ -3,6 +3,7 @@
  * Must match frontend src/constants/adminSectionAccess.js and AdminLayout nav sectionKey.
  */
 const { CRM_SECTION, CRM_MANAGER_SECTION } = require('./crm');
+const { CRM_ACCESS_SECTION } = require('./crmUsers');
 
 const ADMIN_SECTION_KEYS = [
   'dashboard',
@@ -47,6 +48,7 @@ const ADMIN_SECTION_KEYS = [
   'system-prompt',
   CRM_SECTION,
   CRM_MANAGER_SECTION,
+  CRM_ACCESS_SECTION,
 ];
 
 module.exports = { ADMIN_SECTION_KEYS };

@@ -17,15 +17,29 @@ const {
   normalizeConsultancyName,
   normalizeIndianMobile,
   actorId,
+  auditActor,
   CONSULTANCY_STATUS,
   CONTACT_STATUS,
 } = require('./fields');
+const { CONSULTANCY_PIPELINE } = require('../../constants/crm');
+
+function pipelineStageOf(value) {
+  return CONSULTANCY_PIPELINE.includes(value) ? value : 'fresh';
+}
+
+function readPipelineStage(value) {
+  if (!CONSULTANCY_PIPELINE.includes(value)) {
+    throw new CrmError(400, 'Pipeline stage must be fresh, contacted, meeting done, or onboarded.', 'invalid_body');
+  }
+  return value;
+}
 
 function consultancyDTO(doc) {
   return {
     id: String(doc._id),
     name: doc.name,
     status: doc.status,
+    pipelineStage: pipelineStageOf(doc.pipelineStage),
     notes: doc.notes || '',
     createdBy: doc.createdBy ? String(doc.createdBy) : null,
     updatedBy: doc.updatedBy ? String(doc.updatedBy) : null,
@@ -77,14 +91,30 @@ function publicFields(dto) {
   return {
     name: dto.name,
     status: dto.status,
+    pipelineStage: dto.pipelineStage,
     notes: dto.notes,
   };
+}
+
+async function countPipeline(filter) {
+  const rows = await CrmConsultancy.aggregate([
+    { $match: filter },
+    { $group: { _id: { $ifNull: ['$pipelineStage', 'fresh'] }, count: { $sum: 1 } } },
+  ]);
+  const pipeline = { total: 0, fresh: 0, contacted: 0, meeting_done: 0, onboarded: 0 };
+  rows.forEach((row) => {
+    const key = pipelineStageOf(row._id);
+    pipeline[key] += row.count;
+    pipeline.total += row.count;
+  });
+  return pipeline;
 }
 
 async function listConsultancies(query) {
   const { page, limit, skip } = parsePageLimit(query);
   const q = optionalQueryString(query.q, 'q');
   const status = optionalQueryString(query.status, 'status');
+  const pipelineStage = optionalQueryString(query.pipelineStage, 'pipelineStage');
   const filter = { deletedAt: null };
   if (status) {
     if (!CONSULTANCY_STATUS.includes(status)) {
@@ -95,17 +125,35 @@ async function listConsultancies(query) {
   if (q) {
     filter.name = new RegExp(escapeRegex(q), 'i');
   }
+  const pipeline = await countPipeline(filter);
+  if (pipelineStage) {
+    if (!CONSULTANCY_PIPELINE.includes(pipelineStage)) {
+      throw new CrmError(400, 'pipelineStage must be fresh, contacted, meeting_done, or onboarded.', 'invalid_query');
+    }
+    if (pipelineStage === 'fresh') {
+      filter.$or = [
+        { pipelineStage: 'fresh' },
+        { pipelineStage: { $exists: false } },
+        { pipelineStage: null },
+      ];
+    } else {
+      filter.pipelineStage = pipelineStage;
+    }
+  }
   const [items, total] = await Promise.all([
     CrmConsultancy.find(filter).sort({ name: 1 }).skip(skip).limit(limit).lean(),
     CrmConsultancy.countDocuments(filter),
   ]);
-  return { items: await presentConsultancies(items), page, limit, total };
+  return { items: await presentConsultancies(items), page, limit, total, pipeline };
 }
 
 async function createConsultancy(actor, body, meta) {
   const name = requireText(body && body.name, 'Name', 2, 200);
   const notes = optionalText(body && body.notes, 'Notes', 2000);
   const status = optionalStatus(body && body.status, CONSULTANCY_STATUS, 'Status', 'active');
+  const pipelineStage = body && Object.prototype.hasOwnProperty.call(body, 'pipelineStage') && body.pipelineStage !== ''
+    ? readPipelineStage(body.pipelineStage)
+    : 'fresh';
   const normalizedName = normalizeConsultancyName(name);
   const adminId = actorId(actor);
 
@@ -130,6 +178,7 @@ async function createConsultancy(actor, body, meta) {
               name,
               normalizedName,
               status,
+              pipelineStage,
               notes,
               createdBy: adminId,
               updatedBy: adminId,
@@ -144,7 +193,7 @@ async function createConsultancy(actor, body, meta) {
         const dto = consultancyDTO(doc);
         await writeAudit(
           {
-            actorAdminId: adminId,
+            ...auditActor(actor),
             action: 'consultancy.created',
             entityType: 'consultancy',
             entityId: doc._id,
@@ -197,6 +246,9 @@ async function updateConsultancy(actor, id, body, meta) {
   if (body && Object.prototype.hasOwnProperty.call(body, 'status')) {
     doc.status = requireStatus(body.status, CONSULTANCY_STATUS, 'Status');
   }
+  if (body && Object.prototype.hasOwnProperty.call(body, 'pipelineStage')) {
+    doc.pipelineStage = readPipelineStage(body.pipelineStage);
+  }
   doc.updatedBy = adminId;
   const after = publicFields(consultancyDTO(doc));
 
@@ -210,7 +262,7 @@ async function updateConsultancy(actor, id, body, meta) {
       audit: async (session) => {
         await writeAudit(
           {
-            actorAdminId: adminId,
+            ...auditActor(actor),
             action: 'consultancy.updated',
             entityType: 'consultancy',
             entityId: doc._id,
@@ -317,7 +369,7 @@ async function createContact(actor, consultancyIdParam, body, meta) {
       audit: async (session, doc) => {
         await writeAudit(
           {
-            actorAdminId: adminId,
+            ...auditActor(actor),
             action: 'contact.created',
             entityType: 'consultancy_contact',
             entityId: doc._id,
@@ -414,7 +466,7 @@ async function updateContact(actor, consultancyIdParam, contactIdParam, body, me
       audit: async (session) => {
         await writeAudit(
           {
-            actorAdminId: adminId,
+            ...auditActor(actor),
             action,
             entityType: 'consultancy_contact',
             entityId: doc._id,
