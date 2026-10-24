@@ -36,6 +36,7 @@ const {
 } = require('../controllers/oneOnOneCounselingController');
 const { listJeeSessionLeads } = require('../controllers/jeeSessionController');
 const { listMockTestLeads } = require('../controllers/mockTestController');
+const { listJeeMainMockTestLeads, getJeeMainMockTestSummary } = require('../controllers/jeeMainMockTestController');
 const {
   createCounselor,
   listCounselors,
@@ -225,6 +226,8 @@ router.get('/nurturing', requireAdmin, getProgressCheckInSubmissions);
 router.get('/iitain-session-feedback', requireAdmin, getIitainSessionFeedbackSubmissions);
 router.get('/jee-sessions', requireAdmin, listJeeSessionLeads);
 router.get('/mock-test', requireAdmin, listMockTestLeads);
+router.get('/jee-main-mock-test/summary', requireAdmin, getJeeMainMockTestSummary);
+router.get('/jee-main-mock-test', requireAdmin, listJeeMainMockTestLeads);
 router.get('/one-on-one-counseling-leads/funnel-stats', requireAdmin, getOneOnOneCounselingFunnelStats);
 router.get('/one-on-one-counseling-leads', requireAdmin, listOneOnOneCounselingLeads);
 router.patch('/one-on-one-counseling-leads/:id', requireAdmin, patchOneOnOneCounselingLead);

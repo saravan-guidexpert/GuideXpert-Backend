@@ -7,9 +7,9 @@ if (fs.existsSync(gupshupLocalEnv)) {
 }
 const express = require('express');
 const cors = require('cors');
-const mongoose = require('mongoose');
 const connectDB = require('./config/db');
 const { ensureLocalCrmTestUser } = require('./services/crm/ensureLocalCrmTestUser');
+const { logDbError, isTransientMongoError, publicClientMessage } = require('./utils/mongoRetry');
 const formRoutes = require('./routes/formRoutes');
 const assessmentRoutes = require('./routes/assessmentRoutes');
 const assessment2Routes = require('./routes/assessment2Routes');
@@ -36,6 +36,7 @@ const iitainSessionFeedbackRoutes = require('./routes/iitainSessionFeedbackRoute
 const oneOnOneCounselingRoutes = require('./routes/oneOnOneCounselingRoutes');
 const jeeSessionRoutes = require('./routes/jeeSessionRoutes');
 const mockTestRoutes = require('./routes/mockTestRoutes');
+const jeeMainMockTestRoutes = require('./routes/jeeMainMockTestRoutes');
 const guidanceBookingRoutes = require('./routes/guidanceBookingRoutes');
 const oneOnOneCounselorRoutes = require('./routes/oneOnOneCounselorRoutes');
 const referralRoutes = require('./routes/referralRoutes');
@@ -169,33 +170,9 @@ function logAdminPosterJsonBody(req, res, buf) {
 app.use(express.json({ limit: '15mb', verify: logAdminPosterJsonBody }));
 app.use(express.urlencoded({ extended: true }));
 
-// Ensure MongoDB is connected before handling requests (Vercel serverless cold start)
-let dbConnectPromise = null;
-
-function resetDbConnectPromise() {
-  dbConnectPromise = null;
-}
-
-mongoose.connection.on('disconnected', () => {
-  console.warn('[ensureDB] MongoDB disconnected — will reconnect on next request');
-  resetDbConnectPromise();
-});
-
-mongoose.connection.on('error', (err) => {
-  console.error('[ensureDB] MongoDB connection error:', err?.message || err);
-  resetDbConnectPromise();
-});
-
-async function ensureDbConnected() {
-  if (mongoose.connection.readyState === 1) return;
-  if (!dbConnectPromise) {
-    dbConnectPromise = connectDB().catch((err) => {
-      resetDbConnectPromise();
-      throw err;
-    });
-  }
-  await dbConnectPromise;
-}
+// Ensure MongoDB is connected before handling requests (Vercel serverless cold start).
+// connectDB caches one attempt and will not open a second client while the first
+// is still connecting or while an existing client can recover.
 
 function shouldBypassDbGate(req) {
   if (req.path === '/api/health') return true;
@@ -206,10 +183,10 @@ function shouldBypassDbGate(req) {
 app.use(async (req, res, next) => {
   if (shouldBypassDbGate(req)) return next();
   try {
-    await ensureDbConnected();
+    await connectDB();
     next();
   } catch (err) {
-    console.error('[ensureDB]', err?.message || err);
+    logDbError('[ensureDB]', err);
     next(err);
   }
 });
@@ -308,6 +285,7 @@ app.use('/api/iitain-session-feedback', iitainSessionFeedbackRoutes);
 app.use('/api/one-on-one-counseling', oneOnOneCounselingRoutes);
 app.use('/api/jee-sessions', jeeSessionRoutes);
 app.use('/api/mock-test', mockTestRoutes);
+app.use('/api/jee-main-mock-test', jeeMainMockTestRoutes);
 app.use('/api/guidance-booking', guidanceBookingRoutes);
 app.use('/api/one-on-one-counselor', oneOnOneCounselorRoutes);
 app.use('/api/referral', referralRoutes);
@@ -324,9 +302,13 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  console.error('[Server error]', err);
-  const message = process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong.';
-  res.status(500).json({ success: false, message });
+  logDbError('[Server error]', err);
+  const transient = isTransientMongoError(err);
+  const safe = publicClientMessage(err, 'Something went wrong.');
+  const message = process.env.NODE_ENV === 'development'
+    ? safe
+    : (transient ? 'Database temporarily unavailable. Try again.' : 'Something went wrong.');
+  res.status(transient ? 503 : 500).json({ success: false, message });
 });
 
 const PORT = process.env.PORT || 5000;

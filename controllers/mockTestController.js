@@ -4,6 +4,7 @@ const { ADMIN_LIST_MAX_LIMIT } = require('../constants/listPagination');
 const otpRepository = require('../utils/otpRepository');
 const otpStore = require('../utils/otpStore');
 const VerifiedPhoneSession = require('../models/VerifiedPhoneSession');
+const { dispatchJeeMockTestWhatsApp } = require('../services/jeeMockTestWhatsAppDispatch');
 
 const INDIAN_MOBILE_REGEX = /^[6-9]\d{9}$/;
 const VERIFIED_TTL_MS = 15 * 60 * 1000;
@@ -48,6 +49,10 @@ function mapLead(doc) {
     collegeName: doc.collegeName || '',
     address: doc.address || '',
     remarks: doc.remarks || '',
+    utm_source: doc.utm_source || '',
+    utm_medium: doc.utm_medium || '',
+    utm_campaign: doc.utm_campaign || '',
+    utm_content: doc.utm_content || '',
     formCompleted: Boolean(doc.formCompleted),
     currentStep: doc.currentStep || 1,
     submittedAt: doc.submittedAt || null,
@@ -60,6 +65,15 @@ function validationMessage(err) {
   return Object.values(err.errors || {})
     .map((e) => e.message)
     .join('; ');
+}
+
+function utmSetFromBody(body) {
+  const set = {};
+  for (const key of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content']) {
+    const raw = body?.[key];
+    if (typeof raw === 'string' && raw.trim()) set[key] = raw.trim().slice(0, 200);
+  }
+  return set;
 }
 
 function parseLeadId(body) {
@@ -100,6 +114,8 @@ function buildSearchQuery(q) {
     { collegeName: { $regex: safe, $options: 'i' } },
     { address: { $regex: safe, $options: 'i' } },
     { remarks: { $regex: safe, $options: 'i' } },
+    { utm_content: { $regex: safe, $options: 'i' } },
+    { utm_source: { $regex: safe, $options: 'i' } },
   ];
   if (digits) {
     clauses.push({ contactNumber: { $regex: digits } });
@@ -133,6 +149,7 @@ exports.saveMockTestSection1 = async (req, res) => {
         $set: {
           name: name.text,
           contactNumber: contact.digits,
+          ...utmSetFromBody(body),
           otpVerified: true,
           currentStep: 1,
           formCompleted: false,
@@ -208,6 +225,7 @@ exports.saveMockTestSection2 = async (req, res) => {
           collegeName: collegeName.text,
           address: address.text,
           remarks: remarksRaw,
+          ...utmSetFromBody(body),
           currentStep: 2,
           formCompleted: true,
           submittedAt: new Date(),
@@ -221,6 +239,14 @@ exports.saveMockTestSection2 = async (req, res) => {
         success: false,
         message: 'Registration not found or already submitted. Please start from step 1.',
       });
+    }
+
+    const whatsappSubmit = await dispatchJeeMockTestWhatsApp(doc.toObject());
+    if (whatsappSubmit?.attempted && whatsappSubmit.success === false) {
+      console.warn(
+        '[saveMockTestSection2] registration saved; WhatsApp not sent:',
+        whatsappSubmit.error || whatsappSubmit.skippedReason
+      );
     }
 
     return res.status(200).json({

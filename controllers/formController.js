@@ -307,10 +307,11 @@ exports.sendOtp = async (req, res) => {
         if (privileged) {
           console.warn('[sendOtp] SMS gateway returned error for privileged phone, continuing with bypass code:', gw.error);
         } else {
+          console.warn('[sendOtp] SMS gateway rejected request for phone ending', p.slice(-4), gw.correlationId || '');
           return res.status(502).json({
             success: false,
-            message: 'Could not send OTP.',
-            detail: gw.error || 'SMS service error'
+            status: 'rejected',
+            message: 'Unable to send OTP. Please try again later.',
           });
         }
       }
@@ -373,9 +374,16 @@ exports.sendOtp = async (req, res) => {
       }
     }
 
-    const responsePayload = { success: true, message: 'OTP sent successfully' };
-    if (gw?.details) {
-      responsePayload.provider = gw.details;
+    const responsePayload = {
+      success: true,
+      status: 'accepted',
+      message: 'OTP request submitted. Please check your SMS messages.',
+    };
+    if (gw?.requestId) {
+      responsePayload.requestId = gw.requestId;
+    }
+    if (gw?.correlationId) {
+      responsePayload.correlationId = gw.correlationId;
     }
     if (privileged) {
       responsePayload.isPrivileged = true;
@@ -573,7 +581,7 @@ exports.verifyOtp = async (req, res) => {
       }
     }
 
-    return res.status(200).json({ success: true, message: 'OTP verified', verified: true });
+    return res.status(200).json({ success: true, status: 'verified', message: 'OTP verified', verified: true });
   } catch (err) {
     console.error('[verifyOtp]', err.message, err.stack);
     const message = process.env.NODE_ENV === 'production'
@@ -1471,6 +1479,7 @@ exports.trackIitCounsellingVisit = async (req, res) => {
     let pageKey = 'iitCounselling';
     if (pageKeyRaw === 'oneOnOneSession') pageKey = 'oneOnOneSession';
     else if (pageKeyRaw === 'guidanceBookingConfirmation') pageKey = 'guidanceBookingConfirmation';
+    else if (pageKeyRaw === 'mainPage') pageKey = 'mainPage';
 
     const doc = await IitCounsellingVisit.create({
       pageKey,
@@ -2230,7 +2239,8 @@ exports.deleteApplication = async (req, res) => {
 exports.getMsg91DiagnosticsController = async (req, res) => {
   try {
     const key = req.query.key || req.headers['x-diag-key'];
-    if (key !== 'gx-diag-otp' && key !== process.env.OTP_SECRET && process.env.NODE_ENV === 'production' && req.query.secret !== process.env.OTP_SECRET) {
+    const secret = process.env.OTP_SECRET;
+    if (!secret || key !== secret) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
     const phoneFilter = req.query.phone || '';
@@ -2244,7 +2254,8 @@ exports.getMsg91DiagnosticsController = async (req, res) => {
 exports.testOtpFlowController = async (req, res) => {
   try {
     const key = req.query.key || req.body?.key;
-    if (key !== 'gx-diag-otp' && key !== process.env.OTP_SECRET) {
+    const secret = process.env.OTP_SECRET;
+    if (!secret || key !== secret) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
     const { phone, otp, mode } = req.body || {};

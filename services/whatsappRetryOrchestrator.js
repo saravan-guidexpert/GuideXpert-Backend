@@ -4,6 +4,7 @@ const WhatsAppRetryGroup = require('../models/WhatsAppRetryGroup');
 const FormSubmission = require('../models/FormSubmission');
 const IitCounsellingSubmission = require('../models/IitCounsellingSubmission');
 const OneOnOneCounselingLead = require('../models/OneOnOneCounselingLead');
+const { loadJeeMockTestWhatsAppLead } = require('./jeeMockTestLeadLookup');
 const OneOnOneCounselor = require('../models/OneOnOneCounselor');
 const { buildSlotNotificationVariables } = require('../utils/slotNotificationFormatters');
 const { safeSendWhatsApp } = require('../utils/safeSendWhatsApp');
@@ -15,7 +16,8 @@ const {
   sendIitReminderWhatsApp,
   sendOneOnOneSubmitWhatsApp,
   sendGuidanceBookingSubmitWhatsApp,
-  sendGuidanceCounsellorBookingNotifyWhatsApp
+  sendGuidanceCounsellorBookingNotifyWhatsApp,
+  sendJeeMockTestSubmitWhatsApp
 } = require('./gupshupService');
 const {
   buildOneOnOneSubmitVars,
@@ -29,6 +31,12 @@ const {
   GUPSHUP_TEMPLATE_GUIDANCE_BOOKING_CONFIRM,
   GUPSHUP_TEMPLATE_GUIDANCE_COUNSELLOR_BOOKING_NOTIFY,
 } = require('../utils/guidanceBookingWhatsApp');
+const {
+  buildJeeMockTestSubmitVars,
+  ensureJeeMockTestTemplateEnv,
+  resolveJeeMockTestTemplate,
+  GUPSHUP_TEMPLATE_JEE_MOCK_TEST_INFLUENCER
+} = require('../utils/jeeMockTestWhatsApp');
 const {
   isIitReminderMessageKind,
   resolveIitReminderTemplateEnvKey
@@ -85,6 +93,8 @@ function sendFnForKind(kind) {
       return sendGuidanceBookingSubmitWhatsApp;
     case 'guidance_counsellor_booking_notify':
       return sendGuidanceCounsellorBookingNotifyWhatsApp;
+    case 'jee_mock_test_submit':
+      return sendJeeMockTestSubmitWhatsApp;
     default:
       return null;
   }
@@ -95,6 +105,7 @@ const IMMEDIATE_ONLY_RETRY_KINDS = [
   'one_on_one_submit',
   'guidance_booking_submit',
   'guidance_counsellor_booking_notify',
+  'jee_mock_test_submit',
 ];
 
 /**
@@ -909,6 +920,7 @@ async function processSlotBookedImmediateRetries(cronRunId) {
   const oneOnOnePolicy = getRetryPolicy('one_on_one_submit');
   const guidancePolicy = getRetryPolicy('guidance_booking_submit');
   const guidanceCounsellorPolicy = getRetryPolicy('guidance_counsellor_booking_notify');
+  const jeeMockPolicy = getRetryPolicy('jee_mock_test_submit');
   const delayMs = Math.min(
     60,
     Math.max(
@@ -916,7 +928,8 @@ async function processSlotBookedImmediateRetries(cronRunId) {
       Number(slotPolicy.immediateRetryDelaySeconds) || 15,
       Number(oneOnOnePolicy.immediateRetryDelaySeconds) || 15,
       Number(guidancePolicy.immediateRetryDelaySeconds) || 15,
-      Number(guidanceCounsellorPolicy.immediateRetryDelaySeconds) || 15
+      Number(guidanceCounsellorPolicy.immediateRetryDelaySeconds) || 15,
+      Number(jeeMockPolicy.immediateRetryDelaySeconds) || 15
     )
   ) * 1000;
   const lockMs = Math.max(
@@ -933,7 +946,7 @@ async function processSlotBookedImmediateRetries(cronRunId) {
     createdAt: { $lte: dueBefore }
   })
     .select(
-      '_id phone retryGroupId formSubmissionId iitCounsellingSubmissionId oneOnOneCounselingLeadId cohortSlotInstantUtc opsProduct messageKind templateIdEnvKey errorMessage webhookErrorCode webhookErrorReason'
+      '_id phone retryGroupId formSubmissionId iitCounsellingSubmissionId oneOnOneCounselingLeadId mockTestLeadId cohortSlotInstantUtc opsProduct messageKind templateIdEnvKey errorMessage webhookErrorCode webhookErrorReason'
     )
     .sort({ createdAt: 1 })
     .limit(parseInt(process.env.WA_SLOT_BOOKED_IMMEDIATE_RETRY_MAX_ROWS || '200', 10) || 200)
@@ -1017,13 +1030,15 @@ async function processSlotBookedImmediateRetries(cronRunId) {
     const isOneOnOneRetry = row.messageKind === 'one_on_one_submit';
     const isGuidanceBookingSubmitRetry = row.messageKind === 'guidance_booking_submit';
     const isGuidanceCounsellorNotifyRetry = row.messageKind === 'guidance_counsellor_booking_notify';
+    const isJeeMockRetry = row.messageKind === 'jee_mock_test_submit';
     const isGuidanceRetry = isGuidanceBookingSubmitRetry || isGuidanceCounsellorNotifyRetry;
-    const isIitRetry = !isOneOnOneRetry && !isGuidanceRetry && row.opsProduct === 'iit_counselling';
+    const isIitRetry = !isOneOnOneRetry && !isGuidanceRetry && !isJeeMockRetry && row.opsProduct === 'iit_counselling';
     let sub = null;
     let iitSub = null;
     let oneOnOneLead = null;
     let guidanceSlot = null;
     let guidanceCounselor = null;
+    let mockTestLead = null;
     if (isGuidanceRetry) {
       if (row.oneOnOneCounselingLeadId) {
         oneOnOneLead = await OneOnOneCounselingLead.findById(row.oneOnOneCounselingLeadId).lean();
@@ -1062,6 +1077,22 @@ async function processSlotBookedImmediateRetries(cronRunId) {
         guidanceCounselor = await OneOnOneCounselor.findById(guidanceSlot.oneOnOneCounselorId).lean();
       }
       if (isGuidanceCounsellorNotifyRetry && !guidanceCounselor) {
+        failed += 1;
+        await WhatsAppMessageEvent.updateOne(
+          { _id: row._id, immediateRetryLockToken: lockToken },
+          {
+            $set: { retryEligible: false },
+            $unset: { immediateRetryLockToken: '', immediateRetryLockedAt: '', immediateRetryLockUntil: '' }
+          }
+        );
+        continue;
+      }
+    } else if (isJeeMockRetry) {
+      mockTestLead = await loadJeeMockTestWhatsAppLead({
+        id: row.mockTestLeadId,
+        phone: row.phone,
+      });
+      if (!mockTestLead || !resolveJeeMockTestTemplate(mockTestLead)) {
         failed += 1;
         await WhatsAppMessageEvent.updateOne(
           { _id: row._id, immediateRetryLockToken: lockToken },
@@ -1132,7 +1163,11 @@ async function processSlotBookedImmediateRetries(cronRunId) {
     };
     const slotBookingLabel = iitSub?.iitCounselling?.section1Data?.slotBooking;
     const slotIdForTpl = slotBookingLabel ? IIT_LABEL_TO_SLOT_ID[slotBookingLabel] : null;
-    const vars = isGuidanceBookingSubmitRetry
+    const jeeTemplate = isJeeMockRetry ? resolveJeeMockTestTemplate(mockTestLead) : null;
+    if (jeeTemplate) ensureJeeMockTestTemplateEnv(jeeTemplate);
+    const vars = isJeeMockRetry
+      ? buildJeeMockTestSubmitVars(mockTestLead)
+      : isGuidanceBookingSubmitRetry
       ? buildGuidanceBookingSubmitVars(guidanceSlot)
       : isGuidanceCounsellorNotifyRetry
         ? buildGuidanceCounsellorBookingNotifyVars(oneOnOneLead, guidanceSlot, guidanceCounselor)
@@ -1158,12 +1193,15 @@ async function processSlotBookedImmediateRetries(cronRunId) {
           formSubmissionId: sub ? sub._id : row.formSubmissionId || null,
           iitCounsellingSubmissionId: iitSub ? iitSub._id : row.iitCounsellingSubmissionId || null,
           oneOnOneCounselingLeadId: oneOnOneLead ? oneOnOneLead._id : row.oneOnOneCounselingLeadId || null,
+          mockTestLeadId: mockTestLead ? mockTestLead._id : row.mockTestLeadId || null,
           cohortSlotInstantUtc: isGuidanceRetry
             ? parseGuidanceSlotInstantUtc(guidanceSlot) || row.cohortSlotInstantUtc || null
             : isOneOnOneRetry
               ? parsePreferredSlotInstantUtc(oneOnOneLead) || row.cohortSlotInstantUtc || null
               : iitSub?.counsellingSlotInstantUtc || row.cohortSlotInstantUtc || null,
-          opsProduct: isGuidanceRetry
+          opsProduct: isJeeMockRetry
+            ? 'jee_mock_test'
+            : isGuidanceRetry
             ? 'guidance_booking'
             : isOneOnOneRetry
               ? 'one_on_one_counseling'
@@ -1200,14 +1238,23 @@ async function processSlotBookedImmediateRetries(cronRunId) {
       retryKind: row.messageKind,
       source: 'retry_cron',
       cronRunId,
-      cronJobKey: isGuidanceCounsellorNotifyRetry
+      cronJobKey: isJeeMockRetry
+        ? 'jee_mock_test_submit_immediate_retry'
+        : isGuidanceCounsellorNotifyRetry
         ? 'guidance_counsellor_booking_notify_immediate_retry'
         : isGuidanceBookingSubmitRetry
         ? 'guidance_booking_submit_immediate_retry'
         : isOneOnOneRetry
           ? 'one_on_one_submit_immediate_retry'
           : 'slot_booked_immediate_retry',
-      sendFn: isGuidanceCounsellorNotifyRetry
+      sendFn: isJeeMockRetry
+        ? (phone, sendVars, sendOpts) =>
+            sendJeeMockTestSubmitWhatsApp(phone, sendVars, {
+              ...sendOpts,
+              templateId: jeeTemplate?.templateId,
+              templateEnvKey: jeeTemplate?.templateEnvKey || GUPSHUP_TEMPLATE_JEE_MOCK_TEST_INFLUENCER,
+            })
+        : isGuidanceCounsellorNotifyRetry
         ? sendGuidanceCounsellorBookingNotifyWhatsApp
         : isGuidanceBookingSubmitRetry
         ? sendGuidanceBookingSubmitWhatsApp
@@ -1219,13 +1266,16 @@ async function processSlotBookedImmediateRetries(cronRunId) {
       parentMessageEventId: row._id,
       attemptBatchId: null,
       correlationId: null,
-      opsProduct: isGuidanceRetry
+      opsProduct: isJeeMockRetry
+        ? 'jee_mock_test'
+        : isGuidanceRetry
         ? 'guidance_booking'
         : isOneOnOneRetry
           ? 'one_on_one_counseling'
           : isIitRetry
             ? 'iit_counselling'
             : 'guidexpert',
+      mockTestLeadId: mockTestLead ? mockTestLead._id : row.mockTestLeadId || null,
       cohortSlotInstantUtc: isGuidanceRetry
         ? parseGuidanceSlotInstantUtc(guidanceSlot) || row.cohortSlotInstantUtc || null
         : isOneOnOneRetry
@@ -1235,6 +1285,8 @@ async function processSlotBookedImmediateRetries(cronRunId) {
       oneOnOneCounselingLeadId: oneOnOneLead ? oneOnOneLead._id : row.oneOnOneCounselingLeadId || null,
       ...(row.templateIdEnvKey
         ? { explicitTemplateEnvKey: row.templateIdEnvKey }
+        : isJeeMockRetry
+          ? { explicitTemplateEnvKey: jeeTemplate?.templateEnvKey || GUPSHUP_TEMPLATE_JEE_MOCK_TEST_INFLUENCER }
         : isGuidanceCounsellorNotifyRetry
           ? { explicitTemplateEnvKey: GUPSHUP_TEMPLATE_GUIDANCE_COUNSELLOR_BOOKING_NOTIFY }
           : isGuidanceBookingSubmitRetry

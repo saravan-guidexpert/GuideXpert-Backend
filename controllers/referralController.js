@@ -43,16 +43,18 @@ exports.sendOtp = async (req, res) => {
 
     const skipSms = shouldSkipSmsForPrivileged(p) || (process.env.NODE_ENV !== 'production' && req.body?.skipSms === true);
 
+    let gw = null;
     if (!skipSms) {
-      const gw = await sendOtpSms(p, otp);
+      gw = await sendOtpSms(p, otp);
       if (!gw.success) {
         if (privileged) {
           console.warn('[referral/sendOtp] SMS gateway returned error for privileged phone, continuing with bypass code:', gw.error);
         } else {
+          console.warn('[referral/sendOtp] SMS gateway rejected request for phone ending', p.slice(-4), gw.correlationId || '');
           return res.status(502).json({
             success: false,
-            message: 'Could not send OTP.',
-            detail: gw.error || 'SMS service error'
+            status: 'rejected',
+            message: 'Unable to send OTP. Please try again later.',
           });
         }
       }
@@ -61,7 +63,17 @@ exports.sendOtp = async (req, res) => {
     }
 
     await otpRepository.saveOtp(p, hashed, expiresAt);
-    const responsePayload = { success: true, message: 'OTP sent successfully' };
+    const responsePayload = {
+      success: true,
+      status: 'accepted',
+      message: 'OTP request submitted. Please check your SMS messages.',
+    };
+    if (gw?.requestId) {
+      responsePayload.requestId = gw.requestId;
+    }
+    if (gw?.correlationId) {
+      responsePayload.correlationId = gw.correlationId;
+    }
     if (privileged) {
       responsePayload.isPrivileged = true;
       if (process.env.NODE_ENV !== 'production') {

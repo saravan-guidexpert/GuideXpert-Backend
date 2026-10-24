@@ -69,6 +69,14 @@ function buildRetryPolicies() {
       retryTransientOnly: true,
       cooldownMinutes: 0
     },
+    jee_mock_test_submit: {
+      strategy: 'immediate_only',
+      maxAttempts: 2,
+      immediateRetryDelaySeconds:
+        parseInt(process.env.WA_JEE_MOCK_TEST_SUBMIT_RETRY_DELAY_SECONDS || '15', 10) || 15,
+      retryTransientOnly: true,
+      cooldownMinutes: 0
+    },
     pre4hr: {
       strategy: 'multi_stage',
       maxAttempts: 3,
