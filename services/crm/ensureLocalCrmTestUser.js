@@ -5,9 +5,11 @@ const { CRM_MANAGER_PERMISSIONS, CRM_PERMISSIONS } = require('../../constants/cr
 const { hashPassword } = require('./crmUserPassword');
 
 /**
- * Local CRM sign-in only. These passwords are shorter than the account-creation
- * policy and are never written when NODE_ENV is production or the database is remote.
+ * Sign-in accounts requested for the CRM portal. The passwords are shorter than
+ * the account-creation form allows, so they are stored here and accepted by login.
+ * Tests skip this so fixtures stay under the test's control.
  */
+let seeded = false;
 const LOCAL_ACCOUNTS = Object.freeze([
   {
     email: 'admin@guidexpert.local',
@@ -28,14 +30,11 @@ const LOCAL_ACCOUNTS = Object.freeze([
 ]);
 
 function localDevLoginEnabled() {
-  if (process.env.NODE_ENV === 'production') return false;
-  const uri = String(process.env.MONGODB_URI || '');
-  if (!uri || /mongodb\.net|mongodb\+srv/i.test(uri)) return false;
-  return /^mongodb:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(uri);
+  return process.env.NODE_ENV !== 'test';
 }
 
 async function ensureLocalCrmTestUser() {
-  if (!localDevLoginEnabled()) return;
+  if (!localDevLoginEnabled() || seeded) return;
   for (const account of LOCAL_ACCOUNTS) {
     const passwordHash = await hashPassword(account.password);
     try {
@@ -61,13 +60,14 @@ async function ensureLocalCrmTestUser() {
       );
     } catch (err) {
       if (err && err.code === 11000) {
-        console.warn(`[crm] Local sign-in for username "${account.username}" was left unchanged because that email or username belongs to another account.`);
+        console.warn(`[crm] Sign-in for username "${account.username}" was left unchanged because that email or username belongs to another account.`);
         continue;
       }
       throw err;
     }
-    console.log(`[crm] Local sign-in ready for username "${account.username}" (${account.role})`);
+    console.log(`[crm] Sign-in ready for username "${account.username}" (${account.role})`);
   }
+  seeded = true;
 }
 
 module.exports = {
