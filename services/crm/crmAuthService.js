@@ -11,7 +11,6 @@ const { accountSnapshot, writeAuthAudit } = require('./crmAuthAudit');
 const { consumePasswordToken, invalidateOutstandingResetTokens } = require('./crmPasswordResetService');
 const { normalizeEmail, revokeSessions, toDTO } = require('./crmUserAdminService');
 const { commitWithAudit } = require('../../utils/crmMutation');
-const { ensureLocalCrmTestUser } = require('./ensureLocalCrmTestUser');
 const {
   SESSION_COOKIE,
   clearSessionCookies,
@@ -66,7 +65,6 @@ async function login(body, req, res) {
   if (!identifier || identifier.length > 200 || !password) {
     throw new CrmError(400, 'Email and password are required.', 'invalid_body');
   }
-  await ensureLocalCrmTestUser();
   if (!(await assertLoginAllowed(clientIp(req), identifier))) {
     throw new CrmError(429, 'Too many attempts. Try again later.', 'rate_limited');
   }

@@ -37,6 +37,7 @@ const CrmSession = require('../models/CrmSession');
 const CrmPasswordReset = require('../models/CrmPasswordReset');
 const CrmAuthAuditLog = require('../models/CrmAuthAuditLog');
 const CrmStudent = require('../models/CrmStudent');
+const CrmRateLimit = require('../models/CrmRateLimit');
 
 let mongo;
 let server;
@@ -214,6 +215,35 @@ describe('CRM user authentication and access management', { timeout: 180000, con
     assert.equal(missing.status, 401);
     assert.equal(missing.data.code, 'invalid_credentials');
     assert.equal(missing.data.message, bad.data.message);
+  });
+
+  test('production-mode login does not seed or reset local CRM accounts', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const legacyAccounts = [
+      { identifier: 'admin', email: 'admin@guidexpert.local', password: 'admin123' },
+      { identifier: 'test', email: 'test@guidexpert.local', password: 'test123' },
+    ];
+    const seedQuery = {
+      $or: [
+        { username: { $in: legacyAccounts.map((account) => account.identifier) } },
+        { email: { $in: legacyAccounts.map((account) => account.email) } },
+      ],
+    };
+    try {
+      process.env.NODE_ENV = 'production';
+      assert.equal(await CrmUser.countDocuments(seedQuery), 0);
+      for (const account of legacyAccounts) {
+        const result = await login(account.identifier, account.password);
+        assert.equal(result.status, 401);
+        assert.equal(result.data.code, 'invalid_credentials');
+        assert.equal(result.data.data, undefined);
+      }
+      assert.equal(await CrmUser.countDocuments(seedQuery), 0);
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+      resetLoginLimiterForTests();
+      await CrmRateLimit.deleteMany({ key: /^login:/ });
+    }
   });
 
   test('inactive accounts and rate limits do not reveal a usable session', async () => {
