@@ -67,8 +67,8 @@ async function accountFilter(query) {
   }
   let presence = '';
   if (query.presence != null && query.presence !== '') {
-    if (!['online', 'idle', 'offline'].includes(query.presence)) {
-      throw new CrmError(400, 'presence must be online, idle, or offline.', 'invalid_query');
+    if (!['online', 'idle', 'offline', 'inactive', 'invited'].includes(query.presence)) {
+      throw new CrmError(400, 'presence must be online, idle, offline, inactive, or invited.', 'invalid_query');
     }
     presence = query.presence;
   }

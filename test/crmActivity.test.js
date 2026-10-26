@@ -562,4 +562,158 @@ describe('CRM activity timeline', { timeout: 180000, concurrency: 1 }, () => {
     assert.equal(blockedRead.data.code, 'permission_denied');
     assert.equal(sessionB.status, 200);
   });
+
+  test('assignment history, assign, and revoke stay on the caller scope', async () => {
+    const visible = await request('POST', '/api/admin/crm/consultancies', {
+      token: superToken,
+      body: { name: 'Visible House' },
+    });
+    const hidden = await request('POST', '/api/admin/crm/consultancies', {
+      token: superToken,
+      body: { name: 'Hidden House' },
+    });
+    assert.equal(visible.status, 201);
+    assert.equal(hidden.status, 201);
+    const visibleId = visible.data.data.consultancy.id;
+    const hiddenId = hidden.data.data.consultancy.id;
+    const administrator = await createAccount({
+      role: 'crm_administrator',
+      email: 'hist-admin@example.com',
+      username: 'hist.admin',
+      fullName: 'History Admin',
+    });
+    const manager = await createAccount({
+      role: 'crm_manager',
+      email: 'hist-manager@example.com',
+      username: 'hist.manager',
+      fullName: 'History Manager',
+    });
+    const outsider = await createAccount({
+      role: 'crm_viewer',
+      email: 'hist-out@example.com',
+      username: 'hist.out',
+      fullName: 'Outside Viewer',
+    });
+    assert.equal(administrator.status, 201);
+    assert.equal(manager.status, 201);
+    assert.equal(outsider.status, 201);
+    const adminId = administrator.data.data.user.id;
+    const managerId = manager.data.data.user.id;
+    const seeded = await request('POST', `/api/admin/crm-users/${adminId}/assignments`, {
+      token: superToken,
+      body: { consultancyId: visibleId },
+    });
+    assert.equal(seeded.status, 201);
+    const adminSession = await login(administrator.email, administrator.password);
+    const managerSession = await login(manager.email, manager.password);
+    const outsiderSession = await login(outsider.email, outsider.password);
+    assert.equal(adminSession.status, 200);
+    assert.equal(managerSession.status, 200);
+    assert.equal(outsiderSession.status, 200);
+
+    const managerDenied = await request('POST', `/api/crm/users/${outsider.data.data.user.id}/assignments`, {
+      jar: managerSession.jar,
+      csrf: managerSession.csrf,
+      body: { consultancyId: visibleId },
+    });
+    assert.equal(managerDenied.status, 403);
+    assert.equal(await CrmConsultancyAssignment.countDocuments({ consultancyId: visibleId, revokedAt: null }), 1);
+
+    const assigned = await request('POST', `/api/crm/users/${managerId}/assignments`, {
+      jar: adminSession.jar,
+      csrf: adminSession.csrf,
+      body: { consultancyId: visibleId },
+    });
+    assert.equal(assigned.status, 201);
+    assert.equal(assigned.data.data.assignment.consultancyId, visibleId);
+    assert.equal(await CrmConsultancyAssignment.countDocuments({ consultancyId: visibleId, revokedAt: null }), 2);
+
+    const overview = await request('GET', '/api/crm/consultancies/overview?page=1&limit=20', {
+      jar: adminSession.jar,
+    });
+    assert.equal(overview.status, 200);
+    assert.equal(overview.data.data.total, 1);
+    assert.equal(overview.data.data.items.length, 1);
+    assert.equal(overview.data.data.items[0].name, 'Visible House');
+    assert.equal(overview.data.data.items[0].activeAssignees, 2);
+    assert.equal(overview.data.data.items[0].assignees.some((person) => person.fullName === 'History Manager'), true);
+    assert.equal(overview.data.data.unassignedConsultancies, 1);
+    assert.equal(JSON.stringify(overview.data).includes('Hidden House'), false);
+
+    const outsiderOverview = await request('GET', '/api/crm/consultancies/overview?page=1&limit=20&assignment=unassigned', {
+      jar: outsiderSession.jar,
+    });
+    assert.equal(outsiderOverview.status, 200);
+    assert.equal(outsiderOverview.data.data.total, 0);
+    assert.equal(outsiderOverview.data.data.items.length, 0);
+    assert.equal(outsiderOverview.data.data.unassignedConsultancies, null);
+
+    const outsiderHistory = await request(
+      'GET',
+      `/api/crm/activity?page=1&limit=20&source=security&consultancyId=${visibleId}`,
+      { jar: outsiderSession.jar }
+    );
+    assert.equal(outsiderHistory.status, 404);
+    assert.equal(outsiderHistory.data.code, 'not_found');
+    const hiddenHistory = await request(
+      'GET',
+      `/api/crm/activity?page=1&limit=20&source=security&consultancyId=${hiddenId}`,
+      { jar: adminSession.jar }
+    );
+    assert.equal(hiddenHistory.status, 404);
+
+    const history = await request(
+      'GET',
+      `/api/crm/activity?page=1&limit=20&source=security&consultancyId=${visibleId}`,
+      { jar: adminSession.jar }
+    );
+    assert.equal(history.status, 200);
+    const actions = history.data.data.items.map((event) => event.action);
+    assert.equal(actions.filter((action) => action === 'crm_assignment.created').length, 2);
+    assert.equal(
+      history.data.data.items.filter((event) => event.action === 'crm_assignment.created').every((event) => event.summary === 'Consultancy assignment created.' && event.createdAt),
+      true
+    );
+    assert.equal(actions.includes('crm_assignment.revoked'), false);
+    assert.equal(actions.includes('crm_user.login_succeeded'), false);
+    assert.equal(JSON.stringify(history.data).includes('Hidden House'), false);
+    assert.equal(await CrmAuthAuditLog.countDocuments({ action: 'crm_assignment.revoked', targetUserId: managerId }), 0);
+
+    const revoked = await request('DELETE', `/api/crm/users/${managerId}/assignments/${visibleId}`, {
+      jar: adminSession.jar,
+      csrf: adminSession.csrf,
+    });
+    assert.equal(revoked.status, 200);
+    assert.ok(revoked.data.data.assignment.revokedAt);
+    const stored = await CrmConsultancyAssignment.findOne({ consultancyId: visibleId, crmUserId: managerId }).lean();
+    assert.ok(stored.revokedAt);
+    assert.equal(await CrmConsultancyAssignment.countDocuments({ consultancyId: visibleId, revokedAt: null }), 1);
+    const managerNext = await request('GET', `/api/crm/consultancies/${visibleId}`, { jar: managerSession.jar });
+    assert.equal(managerNext.status, 404);
+    const after = await request('GET', '/api/crm/consultancies/overview?page=1&limit=20', { jar: adminSession.jar });
+    assert.equal(after.data.data.items[0].activeAssignees, 1);
+    assert.equal(after.data.data.items[0].assignees.some((person) => person.fullName === 'History Manager'), false);
+    assert.equal(after.data.data.unassignedConsultancies, 1);
+    const managerOverview = await request('GET', '/api/crm/consultancies/overview?page=1&limit=20', {
+      jar: managerSession.jar,
+    });
+    assert.equal(managerOverview.data.data.total, 0);
+    assert.equal(managerOverview.data.data.unassignedConsultancies, null);
+
+    const afterHistory = await request(
+      'GET',
+      `/api/crm/activity?page=1&limit=20&source=security&consultancyId=${visibleId}`,
+      { jar: adminSession.jar }
+    );
+    assert.equal(afterHistory.status, 200);
+    assert.equal(afterHistory.data.data.items.some((event) => event.action === 'crm_assignment.revoked'), true);
+    assert.equal(afterHistory.data.data.items.some((event) => event.action === 'crm_assignment.created'), true);
+    assert.equal(JSON.stringify(afterHistory.data).includes('Hidden House'), false);
+    const stillHidden = await request(
+      'GET',
+      `/api/crm/activity?page=1&limit=20&source=security&consultancyId=${visibleId}`,
+      { jar: outsiderSession.jar }
+    );
+    assert.equal(stillHidden.status, 404);
+  });
 });

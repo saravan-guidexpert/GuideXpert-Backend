@@ -174,6 +174,66 @@ exports.getActivity = async (req, res) => {
   }
 };
 
+exports.admissionHistory = async (req, res) => {
+  try {
+    const history = require('../services/crm/historyService');
+    const data = await history.listAdmissionHistory(activityActor(req), req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] admission history');
+  }
+};
+
+exports.assignmentHistory = async (req, res) => {
+  try {
+    const history = require('../services/crm/historyService');
+    const data = await history.listAssignmentHistory(activityActor(req), req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] assignment history');
+  }
+};
+
+exports.followUpIntelligence = async (req, res) => {
+  try {
+    const intelligence = require('../services/crm/staffIntelligenceService');
+    const data = await intelligence.listFollowUpIntelligence(activityActor(req), req.query || {}, new Date());
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] follow-up intelligence');
+  }
+};
+
+exports.dayEndReport = async (req, res) => {
+  try {
+    const intelligence = require('../services/crm/staffIntelligenceService');
+    const data = await intelligence.listDayEndReport(activityActor(req), req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] day-end report');
+  }
+};
+
+exports.workloadIntelligence = async (req, res) => {
+  try {
+    const intelligence = require('../services/crm/staffIntelligenceService');
+    const data = await intelligence.listWorkload(activityActor(req), req.query || {}, new Date());
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] workload intelligence');
+  }
+};
+
+exports.dailyHistory = async (req, res) => {
+  try {
+    const history = require('../services/crm/historyService');
+    const data = await history.listDailyHistory(activityActor(req), req.query || {});
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] daily history');
+  }
+};
+
 exports.activitySummary = async (req, res) => {
   try {
     const activityService = require('../services/crm/activityService');
