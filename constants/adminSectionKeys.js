@@ -2,6 +2,9 @@
  * Admin section keys allowed for sectionAccess.
  * Must match frontend src/constants/adminSectionAccess.js and AdminLayout nav sectionKey.
  */
+const { CRM_SECTION, CRM_MANAGER_SECTION } = require('./crm');
+const { CRM_ACCESS_SECTION } = require('./crmUsers');
+
 const ADMIN_SECTION_KEYS = [
   'dashboard',
   'funnel-analytics',
@@ -43,6 +46,9 @@ const ADMIN_SECTION_KEYS = [
   'resources',
   'settings',
   'system-prompt',
+  CRM_SECTION,
+  CRM_MANAGER_SECTION,
+  CRM_ACCESS_SECTION,
 ];
 
 module.exports = { ADMIN_SECTION_KEYS };

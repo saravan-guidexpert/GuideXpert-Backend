@@ -7,6 +7,7 @@ if (fs.existsSync(gupshupLocalEnv)) {
 }
 const express = require('express');
 const cors = require('cors');
+const { apiCorsOptions } = require('./utils/apiCors');
 const connectDB = require('./config/db');
 const { logDbError, isTransientMongoError, publicClientMessage } = require('./utils/mongoRetry');
 const formRoutes = require('./routes/formRoutes');
@@ -68,11 +69,25 @@ const { getPosterDownloads, getPosterDownloadStats } = require('./controllers/po
 const { getCollegeComparisons } = require('./controllers/collegeComparisonAdminController');
 const { checkPosterEligibility, trackPosterDownload } = require('./controllers/posterController');
 const requireAdmin = require('./middleware/requireAdmin');
+const requireAdminSection = require('./middleware/requireAdminSection');
+const crmRoutes = require('./routes/crmRoutes');
+const crmAuthRoutes = require('./routes/crmAuthRoutes');
+const { adminCrmUserRoutes, portalCrmUserRoutes } = require('./routes/crmUserAdminRoutes');
+const { requireCrmSession } = require('./middleware/requireCrmSession');
+const crmPortalGate = require('./middleware/crmPortalGate');
+const { CRM_SECTION_KEY } = require('./constants/crm');
+const { CRM_ACCESS_SECTION } = require('./constants/crmUsers');
 const {
   getWhatsAppConfigStatus,
   logWhatsAppConfigWarnings,
 } = require('./utils/whatsappConfigStatus');
 const app = express();
+// Vercel sets VERCEL=1 and terminates one proxy hop. Client-supplied
+// Forwarded headers are not trusted unless that platform variable is present.
+// Confirm the API is served by Vercel before relying on req.ip as the browser.
+if (process.env.VERCEL === '1') {
+  app.set('trust proxy', 1);
+}
 
 // OTP (MSG91): required in production only; in dev allow startup without them
 const requiredOtpEnv = ['MSG91_AUTH_KEY', 'MSG91_TEMPLATE_ID', 'OTP_SECRET'];
@@ -104,48 +119,7 @@ if (!process.env.WEBINAR_JWT_SECRET && !process.env.COUNSELLOR_JWT_SECRET) {
 }
 logWhatsAppConfigWarnings();
 
-const allowedOrigins = [
-  process.env.FRONTEND_URL,
-  'https://www.guidexpert.co.in',
-  'https://guidexpert.co.in',
-  'http://www.guidexpert.co.in',
-  'http://guidexpert.co.in',
-  'https://guide-xpert-frontend.vercel.app',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-].filter(Boolean);
-if (allowedOrigins.length === 0) allowedOrigins.push('https://guidexpert.co.in');
-// Allow any Vercel preview/production frontend (*.vercel.app)
-const vercelOriginRegex = /^https:\/\/[a-z0-9-]+(-[a-z0-9-]+)*\.vercel\.app$/i;
-// Any localhost / 127.0.0.1 port (Vite may use 5173, 5174, etc.)
-const localhostDevOriginRegex = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
-// Production/staging on guidexpert.co.in (www or subdomains)
-const guidexpertOriginRegex = /^https?:\/\/([a-z0-9-]+\.)*guidexpert\.co\.in$/i;
-
-function isAllowedCorsOrigin(origin) {
-  if (!origin) return true;
-  return (
-    allowedOrigins.includes(origin) ||
-    vercelOriginRegex.test(origin) ||
-    localhostDevOriginRegex.test(origin) ||
-    guidexpertOriginRegex.test(origin)
-  );
-}
-
-const corsOptions = {
-  origin(origin, callback) {
-    if (isAllowedCorsOrigin(origin)) {
-      return callback(null, origin || allowedOrigins[0]);
-    }
-    console.warn('[cors] Blocked origin:', origin);
-    return callback(null, false);
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  optionsSuccessStatus: 204,
-};
-app.use(cors(corsOptions));
+app.use(cors(apiCorsOptions()));
 // Poster templates: large SVG + JSON overhead; keep above MAX_SVG_CHARS in posterTemplateController (~2MB markup alone)
 function logAdminPosterJsonBody(req, res, buf) {
   try {
@@ -237,6 +211,23 @@ app.use('/api/admin/whatsapp-chat', requireAdmin, whatsappChatAdminRoutes);
 app.use('/api/admin/ai-calls', requireAdmin, aiCallsAdminRoutes);
 app.use('/api/admin/lead-insights', requireAdmin, leadInsightsRoutes);
 app.use('/api/admin/analytics', requireAdmin, analyticsExecutiveRoutes);
+// /crm in the browser stays on the demo store. /api/admin/crm stays on the admin JWT.
+// /api/crm-auth and /api/crm are the separate CRM-user session and do not grant admin access.
+app.use('/api/crm-auth', crmAuthRoutes);
+app.use('/api/crm/users', requireCrmSession, portalCrmUserRoutes);
+app.use('/api/crm', requireCrmSession, crmPortalGate, crmRoutes);
+app.use(
+  '/api/admin/crm-users',
+  requireAdmin,
+  requireAdminSection(CRM_ACCESS_SECTION, 'CRM access management is required.'),
+  adminCrmUserRoutes
+);
+app.use(
+  '/api/admin/crm',
+  requireAdmin,
+  requireAdminSection(CRM_SECTION_KEY, 'Consultancy CRM access is required.'),
+  crmRoutes
+);
 app.use('/api/admin', adminRoutes);
 app.use('/api/resources', require('./routes/resourceRoutes'));
 app.get('/api/student-workspace-updates', require('./controllers/studentWorkspaceUpdateController').publicList);
