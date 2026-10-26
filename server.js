@@ -7,9 +7,9 @@ if (fs.existsSync(gupshupLocalEnv)) {
 }
 const express = require('express');
 const cors = require('cors');
-const { crmCorsOrigin } = require('./utils/crmOrigin');
-const mongoose = require('mongoose');
+const { apiCorsOptions } = require('./utils/apiCors');
 const connectDB = require('./config/db');
+const { logDbError, isTransientMongoError, publicClientMessage } = require('./utils/mongoRetry');
 const formRoutes = require('./routes/formRoutes');
 const assessmentRoutes = require('./routes/assessmentRoutes');
 const assessment2Routes = require('./routes/assessment2Routes');
@@ -119,21 +119,7 @@ if (!process.env.WEBINAR_JWT_SECRET && !process.env.COUNSELLOR_JWT_SECRET) {
 }
 logWhatsAppConfigWarnings();
 
-const corsOptions = {
-  origin(origin, callback) {
-    return crmCorsOrigin(origin, (err, allowed) => {
-      if (origin && allowed !== origin) {
-        console.warn('[cors] Blocked an origin that is not on the CRM allow-list.');
-      }
-      return callback(err, allowed);
-    });
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CRM-CSRF'],
-  optionsSuccessStatus: 204,
-};
-app.use(cors(corsOptions));
+app.use(cors(apiCorsOptions()));
 // Poster templates: large SVG + JSON overhead; keep above MAX_SVG_CHARS in posterTemplateController (~2MB markup alone)
 function logAdminPosterJsonBody(req, res, buf) {
   try {
@@ -149,33 +135,9 @@ function logAdminPosterJsonBody(req, res, buf) {
 app.use(express.json({ limit: '15mb', verify: logAdminPosterJsonBody }));
 app.use(express.urlencoded({ extended: true }));
 
-// Ensure MongoDB is connected before handling requests (Vercel serverless cold start)
-let dbConnectPromise = null;
-
-function resetDbConnectPromise() {
-  dbConnectPromise = null;
-}
-
-mongoose.connection.on('disconnected', () => {
-  console.warn('[ensureDB] MongoDB disconnected — will reconnect on next request');
-  resetDbConnectPromise();
-});
-
-mongoose.connection.on('error', (err) => {
-  console.error('[ensureDB] MongoDB connection error:', err?.message || err);
-  resetDbConnectPromise();
-});
-
-async function ensureDbConnected() {
-  if (mongoose.connection.readyState === 1) return;
-  if (!dbConnectPromise) {
-    dbConnectPromise = connectDB().catch((err) => {
-      resetDbConnectPromise();
-      throw err;
-    });
-  }
-  await dbConnectPromise;
-}
+// Ensure MongoDB is connected before handling requests (Vercel serverless cold start).
+// connectDB caches one attempt and will not open a second client while the first
+// is still connecting or while an existing client can recover.
 
 function shouldBypassDbGate(req) {
   if (req.path === '/api/health') return true;
@@ -186,10 +148,10 @@ function shouldBypassDbGate(req) {
 app.use(async (req, res, next) => {
   if (shouldBypassDbGate(req)) return next();
   try {
-    await ensureDbConnected();
+    await connectDB();
     next();
   } catch (err) {
-    console.error('[ensureDB]', err?.message || err);
+    logDbError('[ensureDB]', err);
     next(err);
   }
 });
@@ -305,9 +267,13 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  console.error('[Server error]', err);
-  const message = process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong.';
-  res.status(500).json({ success: false, message });
+  logDbError('[Server error]', err);
+  const transient = isTransientMongoError(err);
+  const safe = publicClientMessage(err, 'Something went wrong.');
+  const message = process.env.NODE_ENV === 'development'
+    ? safe
+    : (transient ? 'Database temporarily unavailable. Try again.' : 'Something went wrong.');
+  res.status(transient ? 503 : 500).json({ success: false, message });
 });
 
 const PORT = process.env.PORT || 5000;

@@ -90,12 +90,38 @@ describe('CRM origin allow-list', () => {
     assert.equal(missing.allowOrigin, null);
   });
 
-  test('the API server uses the same origin helper as CRM login', () => {
+  test('the API server uses the CRM origin helper for CRM paths only', async () => {
     const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
-    assert.match(source, /crmCorsOrigin/);
-    assert.equal(source.includes('vercelOriginRegex'), false);
-    assert.equal(source.includes('guidexpertOriginRegex'), false);
+    assert.match(source, /cors\(apiCorsOptions\(\)\)/);
+    const apiCors = fs.readFileSync(path.join(__dirname, '../utils/apiCors.js'), 'utf8');
+    assert.match(apiCors, /crmCorsOrigin/);
     const login = fs.readFileSync(path.join(__dirname, '../services/crm/crmAuthService.js'), 'utf8');
     assert.match(login, /assertAllowedOrigin/);
+
+    const { apiCorsOptions } = require('../utils/apiCors');
+    const app = express();
+    app.use(cors(apiCorsOptions(productionEnv())));
+    app.use((req, res) => res.json({ ok: true }));
+    const server = app.listen(0);
+    try {
+      const base = `http://127.0.0.1:${server.address().port}`;
+      const preflight = async (pathname, origin) => {
+        const response = await fetch(`${base}${pathname}`, {
+          method: 'OPTIONS',
+          headers: { Origin: origin, 'Access-Control-Request-Method': 'POST' },
+        });
+        return response.headers.get('access-control-allow-origin');
+      };
+      const preview = 'https://preview-guidexpert.vercel.app';
+      assert.equal(await preflight('/api/crm/activity', preview), null);
+      assert.equal(await preflight('/api/crm-auth/login', preview), null);
+      assert.equal(await preflight('/api/crm-auth/login', 'https://www.guidexpert.co.in'), 'https://www.guidexpert.co.in');
+      assert.equal(await preflight('/api/jee-main-mock-test', preview), preview);
+      assert.equal(await preflight('/api/forms', 'https://tenant.guidexpert.co.in'), 'https://tenant.guidexpert.co.in');
+      assert.equal(await preflight('/api/crmx', preview), preview);
+      assert.equal(await preflight('/api/forms', 'https://evil.example'), null);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });
