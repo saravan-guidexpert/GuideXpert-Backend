@@ -533,7 +533,8 @@ describe('consultancy CRM phase 1', { timeout: 180000 }, () => {
   test('consultancies, contacts, search, and pagination', async () => {
     const created = await createConsultancy(staffToken, 'Horizon Consultants');
     assert.equal(created.status, 201);
-    assert.equal(Object.hasOwn(created.data.data.consultancy, 'pipelineStage'), false);
+    assert.equal(created.data.data.consultancy.pipelineStage, 'fresh');
+    assert.equal(created.data.data.consultancy.followUpStatus, 'Fresh Lead');
     assert.equal(Object.hasOwn(created.data.data, 'pipeline'), false);
     const id = created.data.data.consultancy.id;
     const nameBefore = created.data.data.consultancy.name;
@@ -542,11 +543,13 @@ describe('consultancy CRM phase 1', { timeout: 180000 }, () => {
       token: staffToken,
       body: { pipelineStage: 'hot' },
     });
-    assert.equal(ignoredStage.status, 200);
-    assert.equal(ignoredStage.data.data.consultancy.name, nameBefore);
-    assert.equal(ignoredStage.data.data.consultancy.status, statusBefore);
-    assert.equal(Object.hasOwn(ignoredStage.data.data.consultancy, 'pipelineStage'), false);
-    assert.equal(Object.hasOwn(ignoredStage.data.data, 'pipeline'), false);
+    assert.equal(ignoredStage.status, 400);
+    assert.equal(ignoredStage.data.code, 'invalid_body');
+    const unchanged = await api('GET', `/api/admin/crm/consultancies/${id}`, { token: staffToken });
+    assert.equal(unchanged.data.data.consultancy.name, nameBefore);
+    assert.equal(unchanged.data.data.consultancy.status, statusBefore);
+    assert.equal(unchanged.data.data.consultancy.pipelineStage, 'fresh');
+    assert.equal(Object.hasOwn(unchanged.data.data, 'pipeline'), false);
     const stored = await CrmConsultancy.findById(id).lean();
     assert.equal(stored.name, nameBefore);
     assert.equal(stored.status, statusBefore);
@@ -600,7 +603,7 @@ describe('consultancy CRM phase 1', { timeout: 180000 }, () => {
     assert.equal(listed.data.data.total, 1);
     assert.equal(listed.data.data.items.length, 1);
     assert.equal(listed.data.data.items[0].id, id);
-    assert.equal(Object.hasOwn(listed.data.data.items[0], 'pipelineStage'), false);
+    assert.equal(listed.data.data.items[0].pipelineStage, 'fresh');
     assert.equal(Object.hasOwn(listed.data.data, 'pipeline'), false);
     const stageQuery = await api('GET', '/api/admin/crm/consultancies?page=1&limit=20&pipelineStage=fresh&q=horizon', {
       token: staffToken,
@@ -608,7 +611,12 @@ describe('consultancy CRM phase 1', { timeout: 180000 }, () => {
     assert.equal(stageQuery.status, 200);
     assert.equal(Object.hasOwn(stageQuery.data.data, 'pipeline'), false);
     assert.equal(stageQuery.data.data.items.some((row) => row.id === id), true);
-    assert.equal(stageQuery.data.data.items.every((row) => !Object.hasOwn(row, 'pipelineStage')), true);
+    assert.equal(stageQuery.data.data.items.every((row) => row.pipelineStage === 'fresh'), true);
+    const otherStage = await api('GET', '/api/admin/crm/consultancies?page=1&limit=20&pipelineStage=onboarded&q=horizon', {
+      token: staffToken,
+    });
+    assert.equal(otherStage.status, 200);
+    assert.equal(otherStage.data.data.total, 0);
 
     const literal = await api('GET', '/api/admin/crm/consultancies?page=1&limit=20&q=' + encodeURIComponent('.*'), {
       token: staffToken,

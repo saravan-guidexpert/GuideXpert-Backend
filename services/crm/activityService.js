@@ -8,6 +8,7 @@ const { CrmError } = require('../../utils/crmError');
 const { escapeRegex, parseObjectId, parsePageLimit } = require('../../utils/crmHttp');
 const { businessAuditScope } = require('./auditService');
 const { assignedConsultancyIds } = require('./crmAccess');
+const { resolveAnalyticsRange } = require('../../utils/crmRange');
 
 const ASSIGNMENT_ACTIONS = Object.freeze(['crm_assignment.created', 'crm_assignment.revoked']);
 const AUTHENTICATION_ACTIONS = Object.freeze([
@@ -32,6 +33,7 @@ const QUERY_KEYS = Object.freeze([
   'entityId',
   'consultancyId',
   'q',
+  'timeZone',
 ]);
 const SECRET_KEY = /password|token|otp|secret|authorization|mongodb|connection|cookie|csrf|sessiontoken|resetcode/i;
 const SUMMARIES = Object.freeze({
@@ -110,8 +112,23 @@ function parseActivityQuery(query) {
       throw new CrmError(400, `${key} is not a supported activity filter.`, 'unsupported_filter');
     }
   });
-  const from = parseTimestamp(sourceQuery.from, 'from', 'from');
-  const to = parseTimestamp(sourceQuery.to, 'to', 'to');
+  let timeZone = '';
+  if (sourceQuery.timeZone != null && sourceQuery.timeZone !== '') {
+    timeZone = String(sourceQuery.timeZone);
+  }
+  const fromText = sourceQuery.from == null ? '' : String(sourceQuery.from).trim();
+  const toText = sourceQuery.to == null ? '' : String(sourceQuery.to).trim();
+  const zonedDates = timeZone && /^\d{4}-\d{2}-\d{2}$/.test(fromText) && /^\d{4}-\d{2}-\d{2}$/.test(toText);
+  let from;
+  let to;
+  if (zonedDates) {
+    const bounds = resolveAnalyticsRange({ period: 'custom', from: fromText, to: toText, timeZone });
+    from = bounds.start;
+    to = bounds.end;
+  } else {
+    from = parseTimestamp(sourceQuery.from, 'from', 'from');
+    to = parseTimestamp(sourceQuery.to, 'to', 'to');
+  }
   if (from && to && from.getTime() > to.getTime()) {
     throw new CrmError(400, 'from must be before to.', 'invalid_query');
   }

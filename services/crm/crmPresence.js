@@ -64,6 +64,8 @@ function classifySession(session, user, now) {
 }
 
 function userState(sessions, user, now) {
+  if (user && user.status === 'inactive') return 'inactive';
+  if (user && user.status === 'invited') return 'invited';
   const rows = sessions.map((session) => classifySession(session, user, now));
   if (rows.some((row) => row.state === 'online')) return 'online';
   if (rows.some((row) => row.state === 'idle')) return 'idle';

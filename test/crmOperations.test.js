@@ -273,6 +273,8 @@ describe('CRM operations and directory', { timeout: 180000, concurrency: 1 }, ()
     assert.equal(body.presence.online, 0);
     assert.equal(body.presence.idle, 0);
     assert.equal(body.presence.offline, 0);
+    assert.equal(body.presence.inactive, 0);
+    assert.equal(body.presence.invited, 0);
     assert.equal(body.presence.activeAccounts, 0);
     assert.equal(body.presence.includesAddresses, false);
     assert.equal(JSON.stringify(body).includes('"pipelineStage"'), false);
@@ -484,12 +486,15 @@ describe('CRM operations and directory', { timeout: 180000, concurrency: 1 }, ()
     assert.equal(operations.security.sessionRevocations, 0);
     assert.equal(operations.presence.online, 1);
     assert.equal(operations.presence.idle, 2);
-    assert.equal(operations.presence.offline, 3);
+    assert.equal(operations.presence.offline, 2);
+    assert.equal(operations.presence.inactive, 1);
+    assert.equal(operations.presence.invited, 0);
     assert.equal(operations.presence.activeAccounts, 5);
     assert.equal(operations.presence.scope, 'all_crm_accounts');
     assert.equal(operations.presence.includesAddresses, false);
     assert.equal(
-      operations.presence.online + operations.presence.idle + operations.presence.offline,
+      operations.presence.online + operations.presence.idle + operations.presence.offline
+        + operations.presence.inactive + operations.presence.invited,
       6
     );
     assertNoSecrets(operations);
@@ -560,17 +565,35 @@ describe('CRM operations and directory', { timeout: 180000, concurrency: 1 }, ()
     });
     assert.equal(danaOps.status, 200);
     assert.equal(danaOps.data.data.scope, 'assigned');
-    assert.equal(danaOps.data.data.current.students.total, 1);
+    assert.equal(danaOps.data.data.aggregateScope, 'module');
+    assert.equal(danaOps.data.data.current.students.total, 3);
+    assert.equal(danaOps.data.data.current.consultancies.total, 3);
+    assert.equal(danaOps.data.data.consultancies.total, 1);
     assert.equal(danaOps.data.data.consultancies.items.length, 1);
-    assert.equal(danaOps.data.data.consultancies.unassigned, null);
+    assert.equal(danaOps.data.data.consultancies.unassigned, 1);
     assert.equal(danaOps.data.data.presence.online, 1);
     assert.equal(danaOps.data.data.presence.idle, 2);
-    assert.equal(danaOps.data.data.presence.offline, 3);
+    assert.equal(danaOps.data.data.presence.offline, 2);
+    assert.equal(danaOps.data.data.presence.inactive, 1);
+    assert.equal(danaOps.data.data.presence.invited, 0);
     assert.equal(danaOps.data.data.presence.scope, 'all_crm_accounts');
     assert.equal(danaOps.data.data.security.signInFailed, 1);
     assert.equal(danaOps.data.data.security.signInInactive, 1);
     assert.equal(danaOps.data.data.security.assignmentCreated, 2);
     assert.equal(JSON.stringify(danaOps.data.data).includes('Beta House'), false);
+    const danaOverview = await request('GET', '/api/crm/consultancies/overview?page=1&limit=10', { jar: danaSession.jar });
+    assert.equal(danaOverview.status, 200);
+    assert.equal(danaOverview.data.data.total, 1);
+    assert.equal(danaOverview.data.data.unassignedConsultancies, 1);
+    assert.equal(danaOverview.data.data.items.some((row) => row.name === 'Gamma Quiet'), false);
+    const danaUnassignedList = await request(
+      'GET',
+      '/api/crm/consultancies/overview?page=1&limit=10&assignment=unassigned',
+      { jar: danaSession.jar }
+    );
+    assert.equal(danaUnassignedList.status, 200);
+    assert.equal(danaUnassignedList.data.data.total, 0);
+    assert.equal(danaUnassignedList.data.data.unassignedConsultancies, 1);
 
     const staffOps = await request('GET', `/api/admin/crm${operationsPath({ period: 'all', timeZone: 'UTC' })}`, {
       token: staffToken,
@@ -622,7 +645,7 @@ describe('CRM operations and directory', { timeout: 180000, concurrency: 1 }, ()
     assert.equal(pages[1].presence.activeSessions, 1);
     assert.equal(pages[4].presence.state, 'offline');
     assert.equal(pages[5].status, 'inactive');
-    assert.equal(pages[5].presence.state, 'offline');
+    assert.equal(pages[5].presence.state, 'inactive');
     assertNoSecrets(pages, second.jar);
 
     const online = await request('GET', '/api/admin/crm-users/directory?page=1&limit=10&presence=online', {
@@ -637,7 +660,12 @@ describe('CRM operations and directory', { timeout: 180000, concurrency: 1 }, ()
     assert.equal(online.data.data.total, 1);
     assert.equal(online.data.data.items[0].id, aaronId);
     assert.equal(idle.data.data.total, 2);
-    assert.equal(offline.data.data.total, 3);
+    assert.equal(offline.data.data.total, 2);
+    const inactivePresence = await request('GET', '/api/admin/crm-users/directory?page=1&limit=10&presence=inactive', {
+      token: superToken,
+    });
+    assert.equal(inactivePresence.data.data.total, 1);
+    assert.equal(inactivePresence.data.data.items[0].id, felixId);
     assert.equal(online.data.data.total, whole.data.data.presence.online);
     assert.equal(idle.data.data.total, whole.data.data.presence.idle);
     assert.equal(offline.data.data.total, whole.data.data.presence.offline);

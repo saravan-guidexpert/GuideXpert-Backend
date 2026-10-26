@@ -402,7 +402,7 @@ describe('CRM session presence', { timeout: 180000, concurrency: 1 }, () => {
     assert.equal(deactivated.status, 200);
     assert.equal((await heartbeat(next)).status, 401);
     const afterDeactivate = await request('GET', '/api/admin/crm-users/presence?page=1&limit=20', { token: superToken });
-    assert.equal(afterDeactivate.data.data.items.find((item) => item.userId === userId).state, 'offline');
+    assert.equal(afterDeactivate.data.data.items.find((item) => item.userId === userId).state, 'inactive');
 
     const passwordUser = await createAccount({ email: 'password-presence@example.com', username: 'password.presence' });
     const passwordSession = await login(passwordUser.email);

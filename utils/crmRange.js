@@ -305,6 +305,11 @@ function monthWindow(firstMonth, lastMonth, max = CRM_VOLUME_MAX_MONTHS) {
   };
 }
 
+function calendarDayKey(date, timeZone) {
+  const parts = partsInZone(date, assertTimeZone(timeZone));
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+}
+
 function dayLabel(dateKey) {
   const [year, month, day] = dateKey.split('-').map(Number);
   return new Intl.DateTimeFormat('en-IN', {
@@ -333,6 +338,7 @@ module.exports = {
   eachDateKey,
   eachMonthKey,
   monthWindow,
+  calendarDayKey,
   dayLabel,
   monthLabel,
   shiftDateKey,
