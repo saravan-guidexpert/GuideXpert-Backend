@@ -1032,4 +1032,41 @@ describe('CRM user authentication and access management', { timeout: 180000, con
     assert.equal(text.includes(signedIn.jar.gx_crm_session), false);
     assert.equal(text.includes(signedIn.csrf), false);
   });
+
+  test('super admin login can read the directory and other sessions cannot', async () => {
+    const administrator = await createAccount({ role: 'crm_administrator', email: 'super-admin-login@example.com' });
+    const signedIn = await login(administrator.email, administrator.password);
+    assert.equal(signedIn.status, 200);
+    assert.equal(signedIn.data.data.user.role, 'crm_administrator');
+    const directory = await request('GET', '/api/crm/users/directory?page=1&limit=1', { jar: signedIn.jar });
+    assert.equal(directory.status, 200);
+
+    const bad = await login(administrator.email, 'wrong-password-1');
+    assert.equal(bad.status, 401);
+    assert.equal(bad.data.code, 'invalid_credentials');
+
+    const manager = await createAccount({ role: 'crm_manager', email: 'manager-admin-login@example.com' });
+    const managerSession = await login(manager.email, manager.password);
+    assert.equal(managerSession.status, 200);
+    const denied = await request('GET', '/api/crm/users/directory?page=1&limit=1', { jar: managerSession.jar });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.data.code, 'permission_denied');
+
+    await CrmSession.updateMany(
+      { userId: administrator.data.data.user.id },
+      { $set: { expiresAt: new Date(Date.now() - 1000) } },
+    );
+    const expired = await request('GET', '/api/crm/users/directory?page=1&limit=1', { jar: signedIn.jar });
+    assert.equal(expired.status, 401);
+    assert.equal(expired.data.code, 'session_expired');
+
+    await CrmSession.updateMany(
+      { userId: administrator.data.data.user.id },
+      { $set: { expiresAt: new Date(Date.now() + 60 * 60 * 1000), revokedAt: null } },
+    );
+    const logout = await request('POST', '/api/crm-auth/logout', { jar: signedIn.jar, csrf: signedIn.csrf, body: {} });
+    assert.equal(logout.status, 200);
+    const after = await request('GET', '/api/crm/users/directory?page=1&limit=1', { jar: signedIn.jar });
+    assert.equal(after.status, 401);
+  });
 });

@@ -20,7 +20,7 @@ const OVERVIEW_KEYS = Object.freeze(['page', 'limit', 'status', 'assignment', 'c
 const OPERATION_KEYS = Object.freeze(['page', 'limit', 'period', 'from', 'to', 'timeZone', 'consultancyId']);
 const LIMITATIONS = Object.freeze([
   'Admission status is the current value on the student. Earlier statuses are not stored.',
-  'pipelineStage is not reported. Consultancy writes do not maintain it.',
+  'Consultancy pipeline is stored on the consultancy, separate from record status and calling status. Operations totals do not include that stage.',
   'Referral and student links use the referral\'s current consultancy, not the original source.',
   'A student with no referral is omitted from assignment-scoped totals. Module admission rows include those students at their current status.',
   'A missing or unknown admission status is displayed as Not started and is not written back.',
@@ -32,6 +32,15 @@ function assertKeys(query, allowed, label) {
       throw new CrmError(400, `${key} is not a supported ${label} filter.`, 'unsupported_filter');
     }
   });
+}
+
+function canViewModuleAggregates(actor) {
+  return Boolean(
+    actor
+    && actor.actorType === 'crm-user'
+    && Array.isArray(actor.permissions)
+    && actor.permissions.includes('crm.roles.manage')
+  );
 }
 
 function canViewPresence(actor) {
@@ -160,22 +169,33 @@ async function presenceTotals() {
           },
         },
         offline: {
-          $sum: { $cond: [{ $or: [{ $ne: ['$status', 'active'] }, { $eq: ['$openCount', 0] }] }, 1, 0] },
+          $sum: { $cond: [{ $and: [{ $eq: ['$status', 'active'] }, { $eq: ['$openCount', 0] }] }, 1, 0] },
         },
+        inactive: { $sum: { $cond: [{ $eq: ['$status', 'inactive'] }, 1, 0] } },
+        invited: { $sum: { $cond: [{ $eq: ['$status', 'invited'] }, 1, 0] } },
         activeAccounts: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
       },
     },
   ]);
-  const row = rows[0] || { online: 0, idle: 0, offline: 0, activeAccounts: 0 };
+  const row = rows[0] || { online: 0, idle: 0, offline: 0, inactive: 0, invited: 0, activeAccounts: 0 };
   return {
-    meaning: 'current session state, not events in the selected period',
+    meaning: 'current account and session state, not events in the selected period and not working time',
     scope: 'all_crm_accounts',
     online: row.online,
     idle: row.idle,
     offline: row.offline,
+    inactive: row.inactive,
+    invited: row.invited,
     activeAccounts: row.activeAccounts,
     onlineThresholdMs: PRESENCE_ONLINE_MS,
     includesAddresses: false,
+    states: {
+      online: 'Active account with a valid session heartbeated within two minutes.',
+      idle: 'Active account with a valid session and no heartbeat within two minutes. This is not working time.',
+      offline: 'Active account with no valid session.',
+      inactive: 'Account status inactive. Not combined with offline.',
+      invited: 'Account status invited. Not combined with offline.',
+    },
   };
 }
 
@@ -254,7 +274,9 @@ async function listConsultancyOverview(actor, query) {
   const [items, total, unassignedConsultancies] = await Promise.all([
     CrmConsultancy.find(filter).sort({ name: 1, _id: 1 }).skip(skip).limit(limit).select('name status').lean(),
     CrmConsultancy.countDocuments(filter),
-    scope.moduleWide ? CrmConsultancy.countDocuments(unassignedFilter) : Promise.resolve(null),
+    (!scope.constrained && (scope.moduleWide || canViewModuleAggregates(actor)))
+      ? CrmConsultancy.countDocuments(unassignedFilter)
+      : Promise.resolve(null),
   ]);
   const ids = items.map((row) => row._id);
   const links = ids.length
@@ -282,7 +304,7 @@ async function listConsultancyOverview(actor, query) {
         name: row.name,
         status: row.status,
         activeAssignees: assignees.length,
-        assignees: assignees.slice(0, 5).map((link) => {
+        assignees: assignees.map((link) => {
           const user = userById.get(String(link.crmUserId));
           return {
             id: String(link.crmUserId),
@@ -298,9 +320,13 @@ async function listConsultancyOverview(actor, query) {
     total,
     sort: 'name_asc,id_asc',
     unassignedConsultancies,
-    unassignedMeaning: scope.moduleWide
-      ? 'Non-deleted consultancies in this status filter with no active assignment.'
-      : 'Hidden because this caller only receives assigned consultancies.',
+    unassignedMeaning: scope.constrained
+      ? 'Hidden because this response is limited to one consultancy.'
+      : (scope.moduleWide
+        ? 'Non-deleted consultancies in this status filter with no active assignment.'
+        : (canViewModuleAggregates(actor)
+          ? 'Organization-wide count. This list stays limited to consultancies assigned to the caller.'
+          : 'Hidden because this caller only receives assigned consultancies.')),
   };
 }
 
@@ -334,19 +360,24 @@ async function getOperations(actor, query, now = new Date()) {
   const range = resolveAnalyticsRange(query, now);
   const previous = previousBounds(range);
   const scope = await resolveScope(actor, query.consultancyId);
-  const consultancyFilter = { deletedAt: null };
-  if (scope.ids) consultancyFilter._id = { $in: scope.ids };
-  const [consultancies, totalConsultancies, activeConsultancies, inactiveConsultancies] = await Promise.all([
-    CrmConsultancy.find(consultancyFilter).sort({ name: 1, _id: 1 }).skip(skip).limit(limit).select('name status').lean(),
-    CrmConsultancy.countDocuments(consultancyFilter),
-    CrmConsultancy.countDocuments({ ...consultancyFilter, status: 'active' }),
-    CrmConsultancy.countDocuments({ ...consultancyFilter, status: 'inactive' }),
+  const totalsModule = !scope.constrained && (scope.moduleWide || canViewModuleAggregates(actor));
+  const listFilter = { deletedAt: null };
+  if (scope.ids) listFilter._id = { $in: scope.ids };
+  const totalFilter = { deletedAt: null };
+  if (!totalsModule && scope.ids) totalFilter._id = { $in: scope.ids };
+  const [consultancies, listTotal, totalConsultancies, activeConsultancies, inactiveConsultancies] = await Promise.all([
+    CrmConsultancy.find(listFilter).sort({ name: 1, _id: 1 }).skip(skip).limit(limit).select('name status').lean(),
+    CrmConsultancy.countDocuments(listFilter),
+    CrmConsultancy.countDocuments(totalFilter),
+    CrmConsultancy.countDocuments({ ...totalFilter, status: 'active' }),
+    CrmConsultancy.countDocuments({ ...totalFilter, status: 'inactive' }),
   ]);
   const pageIds = consultancies.map((row) => row._id);
-  const populationMatch = referralMatch(scope.ids, null);
-  const periodMatch = referralMatch(scope.ids, range);
-  const previousMatch = previous ? referralMatch(scope.ids, previous) : null;
-  const activeAssignmentIds = scope.moduleWide
+  const aggregateIds = totalsModule ? null : scope.ids;
+  const populationMatch = referralMatch(aggregateIds, null);
+  const periodMatch = referralMatch(aggregateIds, range);
+  const previousMatch = previous ? referralMatch(aggregateIds, previous) : null;
+  const activeAssignmentIds = totalsModule
     ? await CrmConsultancyAssignment.find({ revokedAt: null }).distinct('consultancyId')
     : [];
   const [distribution, volume, referralTotal, periodReferrals, previousReferrals, rows, security, presence, withoutReferral] = await Promise.all([
@@ -358,7 +389,7 @@ async function getOperations(actor, query, now = new Date()) {
     performanceRows(range, previous, pageIds),
     securityCounts(actor, range, query.consultancyId),
     canViewPresence(actor) ? presenceTotals() : Promise.resolve(null),
-    scope.moduleWide
+    totalsModule
       ? CrmStudent.aggregate([
         { $match: { deletedAt: null } },
         {
@@ -381,9 +412,9 @@ async function getOperations(actor, query, now = new Date()) {
     ])
     : [];
   const assignees = new Map(assignmentCounts.map((row) => [String(row._id), row.count]));
-  const studentsWithoutReferral = scope.moduleWide ? ((withoutReferral[0] && withoutReferral[0].count) || 0) : null;
+  const studentsWithoutReferral = totalsModule ? ((withoutReferral[0] && withoutReferral[0].count) || 0) : null;
   let admission = distribution.length ? distribution.map((row) => ({ status: row.status, count: row.count })) : emptyAdmission();
-  if (scope.moduleWide) {
+  if (totalsModule) {
     const extras = await statusesWithoutReferral();
     admission = admission.map((row) => ({
       status: row.status,
@@ -393,6 +424,7 @@ async function getOperations(actor, query, now = new Date()) {
   return {
     generatedAt: now,
     scope: scope.moduleWide ? 'module' : 'assigned',
+    aggregateScope: totalsModule ? 'module' : 'assigned',
     limitations: LIMITATIONS,
     timeZone: range.timeZone,
     range: {
@@ -411,17 +443,19 @@ async function getOperations(actor, query, now = new Date()) {
       students: {
         withCurrentReferral: referralTotal,
         withoutReferral: studentsWithoutReferral,
-        total: scope.moduleWide ? referralTotal + (studentsWithoutReferral || 0) : referralTotal,
+        total: totalsModule ? referralTotal + (studentsWithoutReferral || 0) : referralTotal,
       },
       referrals: { total: referralTotal, meaning: 'one current referral row per student' },
       admissionStatus: {
-        population: scope.moduleWide ? 'all_non_deleted_students' : 'students_with_current_referral_in_scope',
+        population: totalsModule ? 'all_non_deleted_students' : 'students_with_current_referral_in_scope',
         rows: admission,
         history: null,
       },
     },
     period: {
-      meaning: 'referrals whose referredAt falls in the selected window and whose current consultancy is in scope',
+      meaning: totalsModule
+        ? 'referrals whose referredAt falls in the selected window, counted across the organization'
+        : 'referrals whose referredAt falls in the selected window and whose current consultancy is in scope',
       newReferrals: periodReferrals,
       previousNewReferrals: previousReferrals,
       volume,
@@ -431,8 +465,8 @@ async function getOperations(actor, query, now = new Date()) {
     consultancies: {
       page,
       limit,
-      total: totalConsultancies,
-      unassigned: scope.moduleWide
+      total: listTotal,
+      unassigned: totalsModule
         ? await CrmConsultancy.countDocuments({ deletedAt: null, _id: { $nin: activeAssignmentIds } })
         : null,
       items: consultancies.map((row) => ({

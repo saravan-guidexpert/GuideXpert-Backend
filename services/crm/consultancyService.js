@@ -1,8 +1,14 @@
 'use strict';
 
+const Admin = require('../../models/Admin');
 const CrmConsultancy = require('../../models/CrmConsultancy');
+const CrmConsultancyAssignment = require('../../models/CrmConsultancyAssignment');
 const CrmConsultancyContact = require('../../models/CrmConsultancyContact');
+const CrmConsultancyRemark = require('../../models/CrmConsultancyRemark');
 const CrmReferral = require('../../models/CrmReferral');
+const CrmUser = require('../../models/CrmUser');
+const { CONSULTANCY_PIPELINE, CONSULTANCY_FOLLOW_UP_STATUSES, CALLING_STATUSES } = require('../../constants/crm');
+const { applyWorkflow, blankWorkflow } = require('./consultancyWorkflow');
 const { CrmError } = require('../../utils/crmError');
 const { isMongoDuplicateKeyError } = require('../../utils/mongoDuplicateKey');
 const { escapeRegex, parseObjectId, parsePageLimit, optionalQueryString } = require('../../utils/crmHttp');
@@ -26,11 +32,20 @@ const {
 } = require('./fields');
 
 function consultancyDTO(doc) {
+  const followUpStatus = CONSULTANCY_FOLLOW_UP_STATUSES.includes(doc.followUpStatus) ? doc.followUpStatus : 'Fresh Lead';
+  const callingStatus = CALLING_STATUSES.includes(doc.callingStatus) ? doc.callingStatus : '';
+  const pipelineStage = CONSULTANCY_PIPELINE.includes(doc.pipelineStage) ? doc.pipelineStage : 'fresh';
   return {
     id: String(doc._id),
     name: doc.name,
     status: doc.status,
     notes: doc.notes || '',
+    followUpStatus,
+    callingStatus,
+    pipelineStage,
+    lastContactAt: doc.lastContactAt || null,
+    nextFollowUpAt: doc.nextFollowUpAt || null,
+    callingStatusChangedAt: doc.callingStatusChangedAt || null,
     createdBy: doc.createdBy ? String(doc.createdBy) : null,
     updatedBy: doc.updatedBy ? String(doc.updatedBy) : null,
     deletedAt: doc.deletedAt || null,
@@ -65,16 +80,58 @@ async function studentCountsByConsultancy(ids) {
 
 async function presentConsultancy(doc) {
   if (!doc) return null;
-  const counts = await studentCountsByConsultancy([doc._id]);
-  return { ...consultancyDTO(doc), studentCount: counts.get(String(doc._id)) || 0 };
+  const [row] = await presentConsultancies([doc]);
+  return row;
 }
 
 async function presentConsultancies(docs) {
-  const counts = await studentCountsByConsultancy(docs.map((doc) => doc._id));
-  return docs.map((doc) => ({
-    ...consultancyDTO(doc),
-    studentCount: counts.get(String(doc._id)) || 0,
-  }));
+  if (!docs.length) return [];
+  const ids = docs.map((doc) => doc._id);
+  const [counts, remarks, assignments] = await Promise.all([
+    studentCountsByConsultancy(ids),
+    CrmConsultancyRemark.aggregate([
+      { $match: { consultancyId: { $in: ids } } },
+      { $sort: { createdAt: -1, _id: -1 } },
+      {
+        $group: {
+          _id: '$consultancyId',
+          text: { $first: '$text' },
+          authorName: { $first: '$authorName' },
+          createdAt: { $first: '$createdAt' },
+        },
+      },
+    ]),
+    CrmConsultancyAssignment.find({ consultancyId: { $in: ids }, revokedAt: null }).sort({ createdAt: 1, _id: 1 }).lean(),
+  ]);
+  const nameIds = [...docs.map((doc) => doc.createdBy), ...assignments.map((row) => row.crmUserId)].filter(Boolean);
+  const [users, admins] = await Promise.all([
+    CrmUser.find({ _id: { $in: nameIds } }).select('fullName').lean(),
+    Admin.find({ _id: { $in: nameIds } }).select('name').lean(),
+  ]);
+  const names = new Map();
+  admins.forEach((row) => names.set(String(row._id), row.name || ''));
+  users.forEach((row) => names.set(String(row._id), row.fullName || ''));
+  const latest = new Map(remarks.map((row) => [String(row._id), row]));
+  const owners = new Map();
+  assignments.forEach((row) => {
+    const key = String(row.consultancyId);
+    const list = owners.get(key) || [];
+    list.push(row);
+    owners.set(key, list);
+  });
+  return docs.map((doc) => {
+    const key = String(doc._id);
+    const links = owners.get(key) || [];
+    const remark = latest.get(key);
+    return {
+      ...consultancyDTO(doc),
+      studentCount: counts.get(key) || 0,
+      createdByName: doc.createdBy ? (names.get(String(doc.createdBy)) || '') : '',
+      ownerId: links[0] ? String(links[0].crmUserId) : null,
+      ownerName: links.map((link) => names.get(String(link.crmUserId)) || '').filter(Boolean).join(', '),
+      latestRemark: remark ? { text: remark.text, authorName: remark.authorName, createdAt: remark.createdAt } : null,
+    };
+  });
 }
 
 function publicFields(dto) {
@@ -82,6 +139,9 @@ function publicFields(dto) {
     name: dto.name,
     status: dto.status,
     notes: dto.notes,
+    followUpStatus: dto.followUpStatus,
+    callingStatus: dto.callingStatus,
+    pipelineStage: dto.pipelineStage,
   };
 }
 
@@ -97,6 +157,13 @@ async function listConsultancies(query, actor) {
       throw new CrmError(400, 'status must be active or inactive.', 'invalid_query');
     }
     filter.status = status;
+  }
+  const pipelineStage = optionalQueryString(query.pipelineStage, 'pipelineStage');
+  if (pipelineStage) {
+    if (!CONSULTANCY_PIPELINE.includes(pipelineStage)) {
+      throw new CrmError(400, 'pipelineStage is not a consultancy pipeline stage.', 'invalid_query');
+    }
+    filter.pipelineStage = pipelineStage;
   }
   if (q) {
     filter.name = new RegExp(escapeRegex(q), 'i');
@@ -114,6 +181,8 @@ async function createConsultancy(actor, body, meta) {
   const status = optionalStatus(body && body.status, CONSULTANCY_STATUS, 'Status', 'active');
   const normalizedName = normalizeConsultancyName(name);
   const adminId = actorId(actor);
+  const workflow = blankWorkflow();
+  applyWorkflow(workflow, body, actor, new Date());
 
   const existing = await CrmConsultancy.findOne({
     normalizedName,
@@ -147,6 +216,7 @@ async function createConsultancy(actor, body, meta) {
               normalizedName,
               status,
               notes,
+              ...workflow,
               createdBy: adminId,
               updatedBy: adminId,
               deletedAt: null,
@@ -242,6 +312,7 @@ async function updateConsultancy(actor, id, body, meta) {
   if (body && Object.prototype.hasOwnProperty.call(body, 'status')) {
     doc.status = requireStatus(body.status, CONSULTANCY_STATUS, 'Status');
   }
+  applyWorkflow(doc, body, actor, new Date());
   doc.updatedBy = adminId;
   const after = publicFields(consultancyDTO(doc));
 
@@ -520,4 +591,5 @@ module.exports = {
   consultancyDTO,
   contactDTO,
   loadEligibleConsultancy,
+  presentConsultancy,
 };

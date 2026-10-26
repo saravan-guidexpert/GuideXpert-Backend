@@ -44,6 +44,8 @@ function crmModels() {
   return [
     require('../models/CrmConsultancy'),
     require('../models/CrmConsultancyContact'),
+    require('../models/CrmConsultancyRemark'),
+    require('../models/CrmConsultancyFollowUp'),
     require('../models/CrmStudent'),
     require('../models/CrmReferral'),
     require('../models/CrmAuditLog'),
