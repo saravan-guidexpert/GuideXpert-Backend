@@ -55,6 +55,12 @@ router.get('/students/:id/referral', students.getStudentReferral);
 router.get('/students/:id', students.getStudent);
 router.patch('/students/:id', students.updateStudent);
 
+router.get('/intelligence/follow-ups', students.followUpIntelligence);
+router.get('/intelligence/day-end', students.dayEndReport);
+router.get('/intelligence/workload', students.workloadIntelligence);
+router.get('/history/admissions', students.admissionHistory);
+router.get('/history/assignments', students.assignmentHistory);
+router.get('/history/daily', students.dailyHistory);
 router.get('/audits', students.listAudits);
 router.get('/activity/summary', students.activitySummary);
 router.get('/activity', students.listActivity);
