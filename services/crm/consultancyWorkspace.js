@@ -125,7 +125,10 @@ async function addRemark(actor, consultancyId, body, meta) {
         action: 'consultancy.remark_added',
         entityType: 'consultancy',
         entityId: saved.consultancy._id,
-        after: { remarkId: String(saved.remark._id) },
+        after: {
+          remarkId: String(saved.remark._id),
+          text: saved.remark.text,
+        },
         ip: meta && meta.ip,
         userAgent: meta && meta.userAgent,
       }, session);
@@ -161,7 +164,14 @@ async function editRemark(actor, consultancyId, remarkIdParam, body, meta) {
         action: 'consultancy.remark_edited',
         entityType: 'consultancy',
         entityId: saved.consultancy._id,
-        after: { remarkId: String(saved.remark._id) },
+        before: {
+          remarkId: String(saved.remark._id),
+          text: saved.remark.previousText,
+        },
+        after: {
+          remarkId: String(saved.remark._id),
+          text: saved.remark.text,
+        },
         ip: meta && meta.ip,
         userAgent: meta && meta.userAgent,
       }, session);
@@ -335,6 +345,18 @@ async function recordFollowUp(actor, consultancyId, body, meta, now = new Date()
   };
 }
 
+// Notes and reason are free text; the audit records only whether they changed.
+function followUpAuditSnapshot(row, changed = {}) {
+  return {
+    status: row.status,
+    scheduledAt: row.scheduledAt ? new Date(row.scheduledAt).toISOString() : null,
+    outcome: row.outcome || '',
+    nextAction: row.nextAction || '',
+    notesChanged: Boolean(changed.notes),
+    reasonChanged: Boolean(changed.reason),
+  };
+}
+
 async function loadFollowUp(consultancy, followUpId, session) {
   const id = parseObjectId(followUpId, 'Follow-up id');
   const query = CrmConsultancyFollowUp.findOne({ _id: id, consultancyId: consultancy._id });
@@ -362,6 +384,11 @@ async function updateFollowUp(actor, consultancyId, followUpId, body, meta, now 
       const followUp = await loadFollowUp(consultancy, followUpId, session);
       if (followUp.cancelledAt) throw new CrmError(409, 'A cancelled follow-up cannot be edited.', 'invalid_transition');
       if (followUp.completedAt) throw new CrmError(409, 'A completed follow-up cannot be edited.', 'invalid_transition');
+      const before = followUpAuditSnapshot(followUp);
+      const changed = {
+        notes: notes !== undefined && notes !== (followUp.notes || ''),
+        reason: reason !== undefined && reason !== (followUp.reason || ''),
+      };
       if (notes !== undefined) followUp.notes = notes;
       if (outcome !== undefined) followUp.outcome = outcome;
       if (nextAction !== undefined) followUp.nextAction = nextAction;
@@ -373,20 +400,24 @@ async function updateFollowUp(actor, consultancyId, followUpId, body, meta, now 
         }
         followUp.scheduledAt = when;
       }
+      const after = followUpAuditSnapshot(followUp, changed);
+      if (JSON.stringify(before) === JSON.stringify(after)) return { consultancy, followUp, unchanged: true };
       await followUp.save({ session });
       if (OPEN_FOLLOW_UP_STATUSES.includes(followUp.status)) {
         await refreshNextFollowUp(consultancy, session);
         await consultancy.save({ session });
       }
-      return { consultancy, followUp };
+      return { consultancy, followUp, before, after, unchanged: false };
     },
     audit: async (session, saved) => {
+      if (saved.unchanged) return;
       await writeAudit({
         ...auditActor(actor),
         action: 'consultancy.follow_up_updated',
         entityType: 'consultancy',
         entityId: saved.consultancy._id,
-        after: { followUpId: String(saved.followUp._id), status: saved.followUp.status, scheduledAt: saved.followUp.scheduledAt },
+        before: { followUpId: String(saved.followUp._id), ...saved.before },
+        after: { followUpId: String(saved.followUp._id), ...saved.after },
         ip: meta && meta.ip,
         userAgent: meta && meta.userAgent,
       }, session);
@@ -418,7 +449,18 @@ async function completeFollowUp(actor, consultancyId, followUpId, meta, now = ne
         action: 'consultancy.follow_up_completed',
         entityType: 'consultancy',
         entityId: saved.consultancy._id,
-        after: { followUpId: String(saved.followUp._id), status: saved.followUp.status, completedAt: saved.followUp.completedAt },
+        before: {
+          followUpId: String(saved.followUp._id),
+          status: saved.followUp.status,
+          scheduledAt: saved.followUp.scheduledAt || null,
+          completedAt: null,
+        },
+        after: {
+          followUpId: String(saved.followUp._id),
+          status: saved.followUp.status,
+          scheduledAt: saved.followUp.scheduledAt || null,
+          completedAt: saved.followUp.completedAt,
+        },
         ip: meta && meta.ip,
         userAgent: meta && meta.userAgent,
       }, session);
@@ -434,6 +476,7 @@ async function cancelFollowUp(actor, consultancyId, followUpId, meta, now = new 
       const consultancy = await loadConsultancy(consultancyId, actor, session);
       const followUp = await loadFollowUp(consultancy, followUpId, session);
       if (followUp.cancelledAt) return { consultancy, followUp, unchanged: true };
+      if (followUp.completedAt) throw new CrmError(409, 'A completed follow-up cannot be cancelled.', 'invalid_transition');
       followUp.cancelledAt = now;
       if (actor && actor.actorType === 'crm-user') followUp.cancelledByCrmUserId = actor._id;
       else followUp.cancelledByAdminId = actorId(actor);
@@ -449,7 +492,18 @@ async function cancelFollowUp(actor, consultancyId, followUpId, meta, now = new 
         action: 'consultancy.follow_up_cancelled',
         entityType: 'consultancy',
         entityId: saved.consultancy._id,
-        after: { followUpId: String(saved.followUp._id), status: saved.followUp.status },
+        before: {
+          followUpId: String(saved.followUp._id),
+          status: saved.followUp.status,
+          scheduledAt: saved.followUp.scheduledAt || null,
+          cancelledAt: null,
+        },
+        after: {
+          followUpId: String(saved.followUp._id),
+          status: saved.followUp.status,
+          scheduledAt: saved.followUp.scheduledAt || null,
+          cancelledAt: saved.followUp.cancelledAt,
+        },
         ip: meta && meta.ip,
         userAgent: meta && meta.userAgent,
       }, session);

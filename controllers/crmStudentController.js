@@ -224,6 +224,16 @@ exports.workloadIntelligence = async (req, res) => {
   }
 };
 
+exports.staff360 = async (req, res) => {
+  try {
+    const staff360 = require('../services/crm/staff360Service');
+    const data = await staff360.getStaff360(activityActor(req), req.params.userId, req.query || {}, new Date());
+    return send(res, 200, { success: true, data });
+  } catch (err) {
+    return handle(res, err, '[crm] staff 360');
+  }
+};
+
 exports.dailyHistory = async (req, res) => {
   try {
     const history = require('../services/crm/historyService');

@@ -329,8 +329,21 @@ describe('CRM consultancy workspace persistence', { timeout: 180000, concurrency
       csrf: session.csrf,
       body: {},
     });
-    assert.equal(cancelledAfter.status, 200);
-    assert.ok(cancelledAfter.data.data.followUp.cancelledAt);
+    assert.equal(cancelledAfter.status, 409);
+    assert.equal(cancelledAfter.data.code, 'invalid_transition');
+    const second = await request('POST', `/api/crm/consultancies/${consultancyId}/follow-ups`, {
+      jar: session.jar,
+      csrf: session.csrf,
+      body: { followUpStatus: 'Follow-up Required', nextAction: 'Call again', scheduledAt: '2099-03-01T00:00:00.000Z' },
+    });
+    assert.equal(second.status, 200);
+    const cancelledOpen = await request('POST', `/api/crm/consultancies/${consultancyId}/follow-ups/${second.data.data.followUp.id}/cancel`, {
+      jar: session.jar,
+      csrf: session.csrf,
+      body: {},
+    });
+    assert.equal(cancelledOpen.status, 200);
+    assert.ok(cancelledOpen.data.data.followUp.cancelledAt);
 
     const mismatch = await request('PATCH', `/api/admin/crm/consultancies/${consultancyId}`, {
       token: superToken,
@@ -357,8 +370,9 @@ describe('CRM consultancy workspace persistence', { timeout: 180000, concurrency
     assert.equal(editedRow.text, 'Called and left a message');
     assert.equal(editedRow.previousText, 'Called the desk');
     const followUps = await request('GET', `/api/crm/consultancies/${consultancyId}/follow-ups?page=1&limit=20`, { jar: session.jar });
-    assert.equal(followUps.data.data.total, 1);
-    assert.ok(followUps.data.data.items[0].cancelledAt);
+    assert.equal(followUps.data.data.total, 2);
+    assert.ok(followUps.data.data.items.some((row) => row.cancelledAt && !row.completedAt));
+    assert.ok(followUps.data.data.items.some((row) => row.completedAt && !row.cancelledAt));
     const hiddenRemarks = await request('GET', `/api/crm/consultancies/${hiddenId}/remarks?page=1&limit=20`, { jar: session.jar });
     assert.equal(hiddenRemarks.status, 404);
 

@@ -1,13 +1,17 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const Admin = require('../../models/Admin');
 const CrmAuditLog = require('../../models/CrmAuditLog');
 const CrmAuthAuditLog = require('../../models/CrmAuthAuditLog');
+const CrmConsultancy = require('../../models/CrmConsultancy');
+const CrmStudent = require('../../models/CrmStudent');
+const CrmUser = require('../../models/CrmUser');
 const { CRM_ACCESS_SECTION } = require('../../constants/crmUsers');
 const { CrmError } = require('../../utils/crmError');
 const { escapeRegex, parseObjectId, parsePageLimit } = require('../../utils/crmHttp');
 const { businessAuditScope } = require('./auditService');
-const { assignedConsultancyIds } = require('./crmAccess');
+const { reportingConsultancyIds, reportingScopeBasis } = require('./crmAccess');
 const { resolveAnalyticsRange } = require('../../utils/crmRange');
 
 const ASSIGNMENT_ACTIONS = Object.freeze(['crm_assignment.created', 'crm_assignment.revoked']);
@@ -64,6 +68,24 @@ const SUMMARIES = Object.freeze({
   'crm_user.reset_completed': 'Password reset completed.',
   'crm_permission.updated': 'CRM admin access updated.',
   'crm_permission.revoked': 'CRM admin access revoked.',
+  'consultancy.follow_up': 'Follow-up created.',
+  'consultancy.follow_up_updated': 'Follow-up updated.',
+  'consultancy.follow_up_completed': 'Follow-up completed.',
+  'consultancy.follow_up_cancelled': 'Follow-up cancelled.',
+  'consultancy.calling_status': 'Calling status changed.',
+  'consultancy.remark_added': 'Remark added.',
+  'consultancy.remark_edited': 'Remark edited.',
+  'consultancy.owner_reassigned': 'Consultancy owner reassigned.',
+});
+const REMARK_ACTIONS = Object.freeze(['consultancy.remark_added', 'consultancy.remark_edited']);
+const STUDENT_ENTITY_TYPES = Object.freeze(['student', 'crmStudent']);
+const ENTITY_TYPE_ALIASES = Object.freeze({
+  student: ['student', 'crmStudent'],
+  crmStudent: ['student', 'crmStudent'],
+  referral: ['referral', 'crmReferral'],
+  crmReferral: ['referral', 'crmReferral'],
+  contact: ['contact', 'consultancy_contact'],
+  consultancy_contact: ['contact', 'consultancy_contact'],
 });
 
 function canViewAccountSecurity(actor) {
@@ -76,6 +98,32 @@ function canViewAccountSecurity(actor) {
     return Array.isArray(actor.sectionAccess) && actor.sectionAccess.includes(CRM_ACCESS_SECTION);
   }
   return false;
+}
+
+// Remark text follows consultancy record access, not audit.read alone.
+function canReadRemarkContent(actor) {
+  if (!actor) return false;
+  if (actor.actorType === 'admin') {
+    if (actor.isSuperAdmin === true) return true;
+    return Array.isArray(actor.sectionAccess) && actor.sectionAccess.includes(CRM_ACCESS_SECTION);
+  }
+  return Array.isArray(actor.permissions) && actor.permissions.includes('crm.consultancies.read');
+}
+
+function scrubRemarkSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
+  if (!Object.prototype.hasOwnProperty.call(snapshot, 'text')) return snapshot;
+  return { ...snapshot, text: '[redacted]' };
+}
+
+function applyRemarkPrivacy(action, before, after, actor) {
+  if (!REMARK_ACTIONS.includes(action) || canReadRemarkContent(actor)) {
+    return { before, after };
+  }
+  return {
+    before: scrubRemarkSnapshot(before),
+    after: scrubRemarkSnapshot(after),
+  };
 }
 
 function andFilters(parts) {
@@ -176,6 +224,7 @@ function parseActivityQuery(query) {
   return {
     from,
     to,
+    timeZone: timeZone || 'UTC',
     source,
     actorType,
     actorId: sourceQuery.actorId ? parseObjectId(sourceQuery.actorId, 'Actor id') : null,
@@ -253,7 +302,7 @@ function securityScope(actor, consultancyIds, consultancyConstrained) {
 // Consultancy-crm staff do not receive authentication events unless they are Super Admin
 // or also have crm-access-management.
 async function resolveConsultancyIds(actor, consultancyId) {
-  const assigned = await assignedConsultancyIds(actor);
+  const assigned = await reportingConsultancyIds(actor);
   if (!consultancyId) {
     return { consultancyIds: assigned, consultancyConstrained: false };
   }
@@ -278,12 +327,26 @@ async function authorizedFilters(actor, parsed) {
     securityScope(actor, scope.consultancyIds, scope.consultancyConstrained),
     ...common,
   ]);
-  if (parsed.entityType) business = andFilters([business, { entityType: parsed.entityType }]);
+  if (parsed.entityType) {
+    const entityTypes = ENTITY_TYPE_ALIASES[parsed.entityType] || [parsed.entityType];
+    business = andFilters([
+      business,
+      entityTypes.length === 1 ? { entityType: entityTypes[0] } : { entityType: { $in: entityTypes } },
+    ]);
+  }
   if (parsed.entityId) business = andFilters([business, { entityId: parsed.entityId }]);
   if (parsed.entityType || parsed.entityId) security = NO_MATCH;
   if (parsed.source === 'business') security = NO_MATCH;
   if (parsed.source === 'security') business = NO_MATCH;
-  return { business, security };
+  let recordScope = scope.consultancyIds == null ? 'module' : 'assigned';
+  if (scope.consultancyConstrained) recordScope = 'consultancy';
+  return {
+    business,
+    security,
+    recordScope,
+    scopeBasis: reportingScopeBasis(actor),
+    accountEventsIncluded: canViewAccountSecurity(actor),
+  };
 }
 
 function redactValue(value, depth) {
@@ -358,9 +421,133 @@ function categoryFor(source, action, entityType) {
   return 'business';
 }
 
-function presentEvent(row, source) {
-  const before = redactValue(row.before == null ? null : row.before);
-  const after = redactValue(row.after == null ? null : row.after);
+
+async function namesForActors(actors) {
+  const userIds = [];
+  const adminIds = [];
+  actors.forEach((actor) => {
+    if (!actor) return;
+    if (actor.type === 'crm-user') userIds.push(actor.id);
+    if (actor.type === 'admin') adminIds.push(actor.id);
+  });
+  const [users, admins] = await Promise.all([
+    userIds.length ? CrmUser.find({ _id: { $in: userIds } }).select('fullName').lean() : [],
+    adminIds.length ? Admin.find({ _id: { $in: adminIds } }).select('name').lean() : [],
+  ]);
+  const names = new Map();
+  users.forEach((row) => names.set(`crm-user:${String(row._id)}`, row.fullName || ''));
+  admins.forEach((row) => names.set(`admin:${String(row._id)}`, row.name || ''));
+  return names;
+}
+
+function fallbackActorName(type) {
+  if (type === 'admin') return 'Unknown platform admin';
+  if (type === 'crm-user') return 'Unknown actor';
+  return 'Unknown actor';
+}
+
+function fallbackEntityLabel(item) {
+  if (item.entityName) return item.entityName;
+  if (item.entityType && item.entityId) return `${item.entityType} ${item.entityId}`;
+  if (item.targetUserName) return item.targetUserName;
+  if (item.targetUserId) return `user ${item.targetUserId}`;
+  return null;
+}
+
+async function enrichActivityItems(items) {
+  const actors = [];
+  const targetIds = [];
+  const consultancyIds = [];
+  const studentIds = [];
+  items.forEach((item) => {
+    if (item.actorType && item.actorId) actors.push({ type: item.actorType, id: item.actorId });
+    if (item.targetUserId) targetIds.push(item.targetUserId);
+    if (item.consultancyId) consultancyIds.push(item.consultancyId);
+    if (STUDENT_ENTITY_TYPES.includes(item.entityType) && item.entityId) studentIds.push(item.entityId);
+  });
+  const [actorNames, targets, consultancies, students] = await Promise.all([
+    namesForActors(actors),
+    targetIds.length ? CrmUser.find({ _id: { $in: targetIds } }).select('fullName').lean() : [],
+    consultancyIds.length
+      ? CrmConsultancy.find({ _id: { $in: consultancyIds } }).select('name deletedAt').lean()
+      : [],
+    studentIds.length
+      ? CrmStudent.find({ _id: { $in: studentIds } }).select('fullName deletedAt').lean()
+      : [],
+  ]);
+  const targetNames = new Map(targets.map((row) => [String(row._id), row.fullName || '']));
+  const consultancyNames = new Map(consultancies.map((row) => [
+    String(row._id),
+    row.deletedAt ? `${row.name || 'Consultancy'} (deleted)` : (row.name || ''),
+  ]));
+  const studentNames = new Map(students.map((row) => [
+    String(row._id),
+    row.deletedAt ? `${row.fullName || 'Student'} (deleted)` : (row.fullName || ''),
+  ]));
+  return items.map((item) => {
+    const resolvedActorName = item.actorType && item.actorId
+      ? (actorNames.get(`${item.actorType}:${item.actorId}`) || '')
+      : '';
+    const actor = item.actorType && item.actorId
+      ? {
+        type: item.actorType,
+        id: item.actorId,
+        name: resolvedActorName,
+        displayName: resolvedActorName || fallbackActorName(item.actorType),
+      }
+      : null;
+    const targetUserName = item.targetUserId ? (targetNames.get(String(item.targetUserId)) || '') : null;
+    const consultancyName = item.consultancyId ? (consultancyNames.get(String(item.consultancyId)) || '') : null;
+    let entityName = item.entityName || null;
+    if (!entityName && STUDENT_ENTITY_TYPES.includes(item.entityType) && item.entityId) {
+      entityName = studentNames.get(String(item.entityId)) || null;
+    }
+    if (!entityName && item.entityType === 'consultancy' && consultancyName) {
+      entityName = consultancyName;
+    }
+    const withNames = {
+      ...item,
+      actor,
+      targetUserName,
+      consultancyName,
+      entityName,
+    };
+    return {
+      ...withNames,
+      entityLabel: fallbackEntityLabel(withNames) || consultancyName || null,
+    };
+  });
+}
+
+
+function snapshotLabel(before, after) {
+  for (const snapshot of [after, before]) {
+    if (!snapshot || typeof snapshot !== 'object') continue;
+    const text = snapshot.fullName || snapshot.name;
+    if (typeof text === 'string' && text.trim()) return text.trim().slice(0, 200);
+  }
+  return null;
+}
+
+function presentEvent(row, source, actor) {
+  const redactedBefore = redactValue(row.before == null ? null : row.before);
+  const redactedAfter = redactValue(row.after == null ? null : row.after);
+  // Diff first so identical redacted placeholders do not hide that text changed.
+  let changes = diffSnapshots(redactedBefore, redactedAfter);
+  const privateSnapshots = applyRemarkPrivacy(row.action, redactedBefore, redactedAfter, actor);
+  const before = privateSnapshots.before;
+  const after = privateSnapshots.after;
+  if (
+    REMARK_ACTIONS.includes(row.action)
+    && !canReadRemarkContent(actor)
+    && Array.isArray(changes)
+  ) {
+    changes = changes.map((change) => (
+      change.field === 'text'
+        ? { ...change, before: '[redacted]', after: '[redacted]' }
+        : change
+    ));
+  }
   const actorAdminId = row.actorAdminId ? String(row.actorAdminId) : null;
   const actorCrmUserId = row.actorCrmUserId ? String(row.actorCrmUserId) : null;
   let actorType = null;
@@ -390,10 +577,11 @@ function presentEvent(row, source) {
     entityId: source === 'business' && row.entityId ? String(row.entityId) : null,
     targetUserId: source === 'security' && row.targetUserId ? String(row.targetUserId) : null,
     consultancyId,
+    entityName: snapshotLabel(before, after),
     outcome: null,
     summary: SUMMARIES[row.action] || row.action,
     reason: row.reason || '',
-    changes: diffSnapshots(before, after),
+    changes,
     before,
     after,
     requestId: null,
@@ -460,14 +648,20 @@ async function listActivity(query, actor) {
     loadScoped(CrmAuthAuditLog, securityIds, filters.security),
   ]);
   const byId = new Map();
-  businessDocs.forEach((doc) => byId.set(`business:${String(doc._id)}`, presentEvent(doc, 'business')));
-  securityDocs.forEach((doc) => byId.set(`security:${String(doc._id)}`, presentEvent(doc, 'security')));
+  businessDocs.forEach((doc) => byId.set(`business:${String(doc._id)}`, presentEvent(doc, 'business', actor)));
+  securityDocs.forEach((doc) => byId.set(`security:${String(doc._id)}`, presentEvent(doc, 'security', actor)));
+  const items = await enrichActivityItems(
+    rows.map((row) => byId.get(`${row.source}:${String(row._id)}`)).filter(Boolean)
+  );
   return {
-    items: rows.map((row) => byId.get(`${row.source}:${String(row._id)}`)).filter(Boolean),
+    items,
     page,
     limit,
     total,
     order: 'createdAt_desc,source_asc,id_desc',
+    recordScope: filters.recordScope,
+    scopeBasis: filters.scopeBasis,
+    accountEventsIncluded: filters.accountEventsIncluded,
   };
 }
 
@@ -492,7 +686,8 @@ async function getActivity(source, id, actor) {
   const filter = source === 'business' ? filters.business : filters.security;
   const doc = await model.findOne(andFilters([filter, { _id: eventId }])).lean();
   if (!doc) throw new CrmError(404, 'Activity event not found.', 'not_found');
-  return presentEvent(doc, source);
+  const [item] = await enrichActivityItems([presentEvent(doc, source, actor)]);
+  return item;
 }
 
 function actionCount(rows, name) {
@@ -502,6 +697,76 @@ function actionCount(rows, name) {
 
 async function activityScope(query, actor) {
   return authorizedFilters(actor, parseActivityQuery(query || {}));
+}
+
+const CREATE_ACTIONS = Object.freeze([
+  'consultancy.created',
+  'contact.created',
+  'student.created',
+  'referral.created',
+  'crm_user.created',
+  'crm_user.invited',
+  'crm_assignment.created',
+  'consultancy.follow_up',
+  'consultancy.remark_added',
+]);
+const UPDATE_ACTIONS = Object.freeze([
+  'consultancy.updated',
+  'contact.updated',
+  'contact.deactivated',
+  'student.updated',
+  'referral.source_corrected',
+  'crm_user.updated',
+  'crm_user.deactivated',
+  'crm_assignment.revoked',
+  'consultancy.follow_up_updated',
+  'consultancy.follow_up_completed',
+  'consultancy.follow_up_cancelled',
+  'consultancy.calling_status',
+  'consultancy.remark_edited',
+  'consultancy.owner_reassigned',
+  'crm_permission.updated',
+  'crm_permission.revoked',
+]);
+
+function countNamedActions(rows, names) {
+  const wanted = new Set(names);
+  return rows.reduce((sum, row) => sum + (wanted.has(row._id) ? row.count : 0), 0);
+}
+
+function daySeries(rows, from, to, timeZone) {
+  const byDay = new Map(rows.map((row) => [row._id, row.count]));
+  const points = [];
+  if (!from || !to) {
+    [...byDay.entries()]
+      .sort((left, right) => String(left[0]).localeCompare(String(right[0])))
+      .forEach(([key, count]) => points.push({ key, label: key, count }));
+    return points;
+  }
+  const cursor = new Date(from.getTime());
+  const end = to.getTime();
+  // Walk calendar days in the reporting zone by advancing 12 hours at a time and
+  // formatting each stamp, so DST gaps do not drop a day key.
+  const seen = new Set();
+  while (cursor.getTime() <= end) {
+    const key = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(cursor);
+    if (!seen.has(key)) {
+      seen.add(key);
+      const label = new Intl.DateTimeFormat('en-IN', {
+        timeZone,
+        day: 'numeric',
+        month: 'short',
+      }).format(cursor);
+      points.push({ key, label, count: byDay.get(key) || 0 });
+    }
+    cursor.setTime(cursor.getTime() + (12 * 60 * 60 * 1000));
+  }
+  return points;
 }
 
 async function summarizeActivity(query, actor) {
@@ -517,21 +782,100 @@ async function summarizeActivity(query, actor) {
     delete sourceQuery.limit;
   }
   const recentLimit = query && query.limit != null && query.limit !== '' ? Number(query.limit) : 10;
-  const filters = await activityScope(sourceQuery, actor);
+  const parsed = parseActivityQuery(sourceQuery);
+  const filters = await authorizedFilters(actor, parsed);
   const accountEventsIncluded = canViewAccountSecurity(actor);
-  const [businessTotal, securityTotal, businessActions, securityActions, recent] = await Promise.all([
+  const timeZone = parsed.timeZone || 'UTC';
+  const dayExpr = { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: timeZone } };
+  const [
+    businessTotal,
+    securityTotal,
+    businessActions,
+    securityActions,
+    recent,
+    activeActorRows,
+    consultancyRows,
+    businessLast,
+    securityLast,
+    businessDays,
+    securityDays,
+    staffRows,
+  ] = await Promise.all([
     CrmAuditLog.countDocuments(filters.business),
     CrmAuthAuditLog.countDocuments(filters.security),
     CrmAuditLog.aggregate([{ $match: filters.business }, { $group: { _id: '$action', count: { $sum: 1 } } }]),
     CrmAuthAuditLog.aggregate([{ $match: filters.security }, { $group: { _id: '$action', count: { $sum: 1 } } }]),
     listActivity({ ...sourceQuery, page: '1', limit: String(recentLimit) }, actor),
+    CrmAuditLog.aggregate([
+      { $match: andFilters([filters.business, { actorCrmUserId: { $type: 'objectId' } }]) },
+      { $group: { _id: '$actorCrmUserId' } },
+      { $count: 'total' },
+    ]),
+    CrmAuditLog.aggregate([
+      { $match: filters.business },
+      {
+        $project: {
+          consultancyId: {
+            $cond: [
+              { $and: [{ $eq: ['$entityType', 'consultancy'] }, { $ne: ['$entityId', null] }] },
+              '$entityId',
+              {
+                $cond: [
+                  { $and: [{ $ne: ['$after.consultancyId', null] }, { $eq: [{ $type: '$after.consultancyId' }, 'string'] }] },
+                  { $toObjectId: '$after.consultancyId' },
+                  null,
+                ],
+              },
+            ],
+          },
+        },
+      },
+      { $match: { consultancyId: { $type: 'objectId' } } },
+      { $group: { _id: '$consultancyId' } },
+      { $count: 'total' },
+    ]),
+    CrmAuditLog.findOne(filters.business).sort({ createdAt: -1 }).select('createdAt').lean(),
+    CrmAuthAuditLog.findOne(filters.security).sort({ createdAt: -1 }).select('createdAt').lean(),
+    CrmAuditLog.aggregate([
+      { $match: filters.business },
+      { $group: { _id: dayExpr, count: { $sum: 1 } } },
+    ]),
+    CrmAuthAuditLog.aggregate([
+      { $match: filters.security },
+      { $group: { _id: dayExpr, count: { $sum: 1 } } },
+    ]),
+    CrmAuditLog.aggregate([
+      { $match: andFilters([filters.business, { actorCrmUserId: { $type: 'objectId' } }]) },
+      {
+        $group: {
+          _id: '$actorCrmUserId',
+          businessEvents: { $sum: 1 },
+          lastAt: { $max: '$createdAt' },
+        },
+      },
+      { $sort: { businessEvents: -1, lastAt: -1 } },
+      { $limit: 20 },
+    ]),
   ]);
   const byAction = (rows) => rows
     .map((row) => ({ action: row._id, count: row.count }))
     .sort((left, right) => right.count - left.count || String(left.action).localeCompare(String(right.action)));
+  const staffIds = staffRows.map((row) => row._id);
+  const staffPeople = staffIds.length
+    ? await CrmUser.find({ _id: { $in: staffIds } }).select('fullName email role status').lean()
+    : [];
+  const staffById = new Map(staffPeople.map((row) => [String(row._id), row]));
+  const lastCandidates = [businessLast && businessLast.createdAt, securityLast && securityLast.createdAt]
+    .filter(Boolean)
+    .map((value) => new Date(value).getTime());
   return {
     visibility: 'visible_to_caller',
+    recordScope: filters.recordScope,
+    aggregateScope: filters.recordScope,
+    scopeBasis: filters.scopeBasis,
     accountEventsIncluded,
+    timeZone,
+    timeZoneConfirmed: false,
     order: recent.order,
     business: { total: businessTotal, byAction: byAction(businessActions) },
     security: {
@@ -545,6 +889,41 @@ async function summarizeActivity(query, actor) {
       assignmentCreated: actionCount(securityActions, 'crm_assignment.created'),
       assignmentRevoked: actionCount(securityActions, 'crm_assignment.revoked'),
     },
+    insights: {
+      meaning: {
+        businessActions: 'Recorded successful business audit events in the selected filters.',
+        activeCrmUsers: 'Distinct CRM accounts that appear as actors on business events in this range.',
+        consultanciesTouched: 'Distinct consultancies referenced by business events in this range.',
+        recordsCreated: 'Business create-style actions recorded in this range.',
+        recordsUpdated: 'Business update-style actions recorded in this range.',
+        securityEvents: 'Authentication, assignment, and account-security events visible to this caller.',
+        lastActivityAt: 'Newest recorded business or security event in this filtered view.',
+        staffBusinessEvents: 'Business audit events attributed to that CRM actor. Not a productivity score.',
+      },
+      activeCrmUsers: activeActorRows[0] ? activeActorRows[0].total : 0,
+      consultanciesTouched: consultancyRows[0] ? consultancyRows[0].total : 0,
+      recordsCreated: countNamedActions(businessActions, CREATE_ACTIONS),
+      recordsUpdated: countNamedActions(businessActions, UPDATE_ACTIONS),
+      lastActivityAt: lastCandidates.length ? new Date(Math.max(...lastCandidates)).toISOString() : null,
+    },
+    series: {
+      grain: 'day',
+      timeZone,
+      business: daySeries(businessDays, parsed.from, parsed.to, timeZone),
+      security: daySeries(securityDays, parsed.from, parsed.to, timeZone),
+    },
+    staff: staffRows.map((row) => {
+      const person = staffById.get(String(row._id));
+      return {
+        userId: String(row._id),
+        fullName: person ? person.fullName : '',
+        email: person ? person.email : null,
+        role: person ? person.role : null,
+        status: person ? person.status : null,
+        businessEvents: row.businessEvents,
+        lastBusinessAt: row.lastAt || null,
+      };
+    }),
     recent: recent.items,
   };
 }

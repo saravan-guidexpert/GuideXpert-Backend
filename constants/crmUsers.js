@@ -135,6 +135,7 @@ function permissionForCrmRequest(method, originalUrl) {
     ['GET', /^\/intelligence\/follow-ups$/i, 'crm.audit.read'],
     ['GET', /^\/intelligence\/day-end$/i, 'crm.audit.read'],
     ['GET', /^\/intelligence\/workload$/i, 'crm.audit.read'],
+    ['GET', /^\/intelligence\/staff\/[a-f\d]{24}$/i, 'crm.roles.manage'],
     ['GET', /^\/history\/admissions$/i, 'crm.audit.read'],
     ['GET', /^\/history\/assignments$/i, 'crm.audit.read'],
     ['GET', /^\/history\/daily$/i, 'crm.audit.read'],

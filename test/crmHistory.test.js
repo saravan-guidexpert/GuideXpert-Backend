@@ -278,9 +278,9 @@ describe('CRM historical reporting', { timeout: 180000, concurrency: 1 }, () => 
 
     const adminList = await request('GET', `/api/crm/history/admissions?${window}`, { jar: adminSession.jar });
     assert.equal(adminList.status, 200);
-    assert.equal(adminList.data.data.scope, 'assigned');
+    assert.equal(adminList.data.data.scope, 'module');
     assert.equal(adminList.data.data.items.some((row) => row.studentId === studentId), true);
-    assert.equal(adminList.data.data.items.some((row) => row.studentId === other.data.data.student.id), false);
+    assert.equal(adminList.data.data.items.some((row) => row.studentId === other.data.data.student.id), true);
     const managerList = await request('GET', `/api/crm/history/admissions?${window}`, { jar: managerSession.jar });
     assert.equal(managerList.data.data.items.some((row) => row.studentId === other.data.data.student.id), true);
     assert.equal(managerList.data.data.items.some((row) => row.studentId === studentId), false);
@@ -288,7 +288,7 @@ describe('CRM historical reporting', { timeout: 180000, concurrency: 1 }, () => 
     const adminDaily = await request('GET', `/api/crm/history/daily?${window}`, { jar: adminSession.jar });
     assert.equal(adminDaily.status, 200);
     assert.equal(adminDaily.data.data.aggregateScope, 'module');
-    assert.equal(adminDaily.data.data.scope, 'assigned');
+    assert.equal(adminDaily.data.data.scope, 'module');
     assert.equal(adminDaily.data.data.timeZoneConfirmed, false);
     assert.equal(adminDaily.data.data.excluded.includes('conversion'), true);
     const createdDays = adminDaily.data.data.items.filter((row) => row.action === 'student.created');

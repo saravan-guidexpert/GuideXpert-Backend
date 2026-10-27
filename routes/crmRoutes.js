@@ -58,6 +58,7 @@ router.patch('/students/:id', students.updateStudent);
 router.get('/intelligence/follow-ups', students.followUpIntelligence);
 router.get('/intelligence/day-end', students.dayEndReport);
 router.get('/intelligence/workload', students.workloadIntelligence);
+router.get('/intelligence/staff/:userId', students.staff360);
 router.get('/history/admissions', students.admissionHistory);
 router.get('/history/assignments', students.assignmentHistory);
 router.get('/history/daily', students.dailyHistory);
