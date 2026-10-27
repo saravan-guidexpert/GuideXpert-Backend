@@ -13,7 +13,7 @@ const { CrmError } = require('../../utils/crmError');
 const { parseObjectId, parsePageLimit } = require('../../utils/crmHttp');
 const { resolveAnalyticsRange } = require('../../utils/crmRange');
 const { businessAuditScope } = require('./auditService');
-const { assignedConsultancyIds } = require('./crmAccess');
+const { reportingConsultancyIds, reportingScopeBasis } = require('./crmAccess');
 
 const SOURCE_CAP = 5000;
 const ADMISSION_ACTIONS = Object.freeze(['student.created', 'student.updated']);
@@ -123,7 +123,7 @@ function named(actor, names) {
 }
 
 async function resolveListScope(actor, consultancyId) {
-  const assigned = await assignedConsultancyIds(actor);
+  const assigned = await reportingConsultancyIds(actor);
   if (!consultancyId) {
     return { consultancyIds: assigned, constrained: false };
   }
@@ -232,6 +232,8 @@ async function listAdmissionHistory(actor, query) {
   return {
     generatedAt: new Date(),
     scope: scope.consultancyIds == null ? 'module' : 'assigned',
+    recordScope: scope.constrained ? 'consultancy' : (scope.consultancyIds == null ? 'module' : 'assigned'),
+    scopeBasis: reportingScopeBasis(actor),
     consultancyLink: 'current_referral',
     timeZone: range.timeZone,
     range: { from: range.from, to: range.to, start: range.start, end: range.end },
@@ -289,6 +291,8 @@ async function listAssignmentHistory(actor, query) {
   return {
     generatedAt: new Date(),
     scope: scope.consultancyIds == null ? 'module' : 'assigned',
+    recordScope: scope.constrained ? 'consultancy' : (scope.consultancyIds == null ? 'module' : 'assigned'),
+    scopeBasis: reportingScopeBasis(actor),
     source: 'crmConsultancyAssignments',
     timeZone: range.timeZone,
     range: { from: range.from, to: range.to, start: range.start, end: range.end },
@@ -388,6 +392,8 @@ async function listDailyHistory(actor, query) {
   return {
     generatedAt: new Date(),
     scope: listScope.consultancyIds == null ? 'module' : 'assigned',
+    recordScope: listScope.constrained ? 'consultancy' : (listScope.consultancyIds == null ? 'module' : 'assigned'),
+    scopeBasis: reportingScopeBasis(actor),
     aggregateScope,
     timeZone: range.timeZone,
     timeZoneConfirmed: false,

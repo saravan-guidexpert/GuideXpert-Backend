@@ -19,6 +19,30 @@ async function assignedConsultancyIds(actor, session) {
   return rows.map((row) => row.consultancyId);
 }
 
+const ORGANIZATION_READ_PERMISSION = 'crm.roles.manage';
+
+// Read-only reporting policy (Model A). A CRM user whose stored permissions include
+// crm.roles.manage reads every consultancy in reporting, history, and activity APIs.
+// Mutations and record pages keep using assertConsultancyAccess.
+function canReadOrganization(actor) {
+  return Boolean(
+    isCrmActor(actor)
+    && Array.isArray(actor.permissions)
+    && actor.permissions.includes(ORGANIZATION_READ_PERMISSION)
+  );
+}
+
+/** Consultancy ids a reporting request may read. null means every consultancy. */
+async function reportingConsultancyIds(actor) {
+  if (canReadOrganization(actor)) return null;
+  return assignedConsultancyIds(actor);
+}
+
+function reportingScopeBasis(actor) {
+  if (!isCrmActor(actor)) return 'platform_admin';
+  return canReadOrganization(actor) ? 'organization_permission' : 'assignment';
+}
+
 async function assertConsultancyAccess(actor, consultancyId, session, message = 'Consultancy not found.') {
   const ids = await assignedConsultancyIds(actor, session);
   if (ids == null) return;
@@ -50,6 +74,9 @@ async function assertReferralAccess(actor, referral, session) {
 module.exports = {
   isCrmActor,
   assignedConsultancyIds,
+  canReadOrganization,
+  reportingConsultancyIds,
+  reportingScopeBasis,
   assertConsultancyAccess,
   visibleStudentIds,
   assertStudentAccess,

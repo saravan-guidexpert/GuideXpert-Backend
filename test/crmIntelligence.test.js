@@ -247,13 +247,13 @@ describe('CRM staff intelligence', { timeout: 180000, concurrency: 1 }, () => {
     assert.equal(adminFollow.status, 200);
     assert.equal(adminFollow.data.data.timeZoneConfirmed, false);
     assert.equal(adminFollow.data.data.aggregateScope, 'module');
-    assert.equal(adminFollow.data.data.scope, 'assigned');
+    assert.equal(adminFollow.data.data.scope, 'module');
     assert.equal(adminFollow.data.data.excluded.includes('working time'), true);
     assert.equal(adminFollow.data.data.excluded.includes('conversion'), true);
     assert.equal(adminFollow.data.data.current.overdue, 4);
     assert.equal(again.data.data.current.overdue, 4);
     assert.equal(adminFollow.data.data.current.unscheduled, 1);
-    assert.equal(adminFollow.data.data.items.some((row) => row.consultancyName === 'Beta Intelligence'), false);
+    assert.equal(adminFollow.data.data.items.some((row) => row.consultancyName === 'Beta Intelligence'), true);
     assert.equal(adminFollow.data.data.items.some((row) => row.bucket === 'unscheduled'), false);
     assert.equal(JSON.stringify(adminFollow.data).includes(studentPhone), false);
     const managerFollow = await request('GET', `/api/crm/intelligence/follow-ups?${window}`, { jar: managerSession.jar });

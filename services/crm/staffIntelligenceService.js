@@ -13,13 +13,20 @@ const { CrmError } = require('../../utils/crmError');
 const { parseObjectId, parsePageLimit } = require('../../utils/crmHttp');
 const { calendarDayKey, previousBounds, resolveAnalyticsRange, shiftDateKey } = require('../../utils/crmRange');
 const { businessAuditScope } = require('./auditService');
-const { assignedConsultancyIds } = require('./crmAccess');
+const { reportingConsultancyIds, reportingScopeBasis } = require('./crmAccess');
 
-const SOURCE_CAP = 5000;
+let SOURCE_CAP = 5000;
+
+function setSourceCapForTests(value) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('CRM intelligence source-cap test controls are refused in production.');
+  }
+  SOURCE_CAP = Number.isFinite(value) && value > 0 ? Math.floor(value) : 5000;
+}
 const BUCKETS = Object.freeze(['overdue', 'due_today', 'upcoming', 'unscheduled', 'completed', 'cancelled']);
 const EVENTS = Object.freeze(['admission', 'assignment', 'follow_up', 'exception']);
 const FOLLOW_UP_KEYS = Object.freeze(['page', 'limit', 'from', 'to', 'timeZone', 'consultancyId', 'userId', 'bucket']);
-const DAY_KEYS = Object.freeze(['page', 'limit', 'date', 'timeZone', 'consultancyId', 'userId', 'event']);
+const DAY_KEYS = Object.freeze(['page', 'limit', 'date', 'timeZone', 'consultancyId', 'userId', 'actorId', 'event']);
 const WORKLOAD_KEYS = Object.freeze(['page', 'limit', 'from', 'to', 'timeZone', 'consultancyId', 'userId']);
 
 const COVERAGE = Object.freeze([
@@ -29,6 +36,8 @@ const COVERAGE = Object.freeze([
   'A consultancy filter and student admission rows use the current referral link, not the consultancy on the day of the change.',
   'Assigned workload counts a shared follow-up once for every current assignee. It is not split and not given to the earliest assignee.',
   'Work performed uses the person stored on the event. It is not inferred from assignment, presence, or session length.',
+  'Day-end userId limits consultancies assigned to that CRM user at the reporting day end. actorId limits rows to the recorded event actor.',
+  'Exception rows carry exceptionReason and severity from stored facts only. They are not a productivity score.',
   'Completion rate is completed rows divided by follow-ups scheduled in the window. Cancelled rows are excluded. No scheduled rows means no rate.',
   'Recorded admission events are not an admission outcome or a conversion rate.',
   'An omitted timezone is UTC. Asia/Kolkata is used only when the caller sends it.',
@@ -38,7 +47,7 @@ const METRICS = Object.freeze([
   {
     id: 'overdue-now',
     formula: 'Open follow-up rows whose scheduledAt is before the report time.',
-    scope: 'Organization-wide only when the caller has crm.roles.manage. Otherwise the caller\'s assigned consultancies.',
+    scope: 'Totals and record lists are organization-wide when the caller has crm.roles.manage. Otherwise both stay inside the caller\'s assigned consultancies.',
     denominator: 'Not a rate.',
     window: 'Current. The report time is the server time of the request.',
     limitations: 'A missing scheduledAt is unscheduled, not overdue. nextFollowUpAt on the consultancy is not used.',
@@ -69,16 +78,16 @@ const METRICS = Object.freeze([
   },
   {
     id: 'outstanding-day',
-    formula: 'Follow-up rows created before the day ended and not completed or cancelled by that time.',
-    scope: 'Same assignment rule. A user filter uses assignment rows open at the day end.',
+    formula: 'Follow-up rows created before the day ended, in an open status (Meeting Scheduled or Follow-up Required), and not completed or cancelled by that time. Overdue compares the schedule as of the day end with the day end.',
+    scope: 'Same as overdue now. A user filter uses assignment rows open at the day end.',
     denominator: 'Not a rate.',
     window: 'The selected reporting day, through 23:59:59.999 in the caller timezone.',
-    limitations: 'Approximate. No end-of-day snapshot is stored. A missing row is not reconstructed.',
+    limitations: 'Approximate. No end-of-day snapshot is stored. Status uses the current value. The schedule at day end is rebuilt from follow-up update audits; rows rescheduled before those audits existed are counted as schedule unknown. A missing row is not reconstructed.',
   },
   {
     id: 'assigned-workload',
     formula: 'Active assignment rows for each CRM user. Open and overdue follow-ups on those consultancies are counted for every current assignee.',
-    scope: 'Staff-wide only for crm.roles.manage. Other callers see users on their assigned consultancies.',
+    scope: 'Every CRM user for crm.roles.manage. Other callers see users on their assigned consultancies.',
     denominator: 'Completion rate uses the scheduled-follow-up cohort above.',
     window: 'Assignments are current. Follow-up completion and admission events use the selected range.',
     limitations: 'Not work performed. Presence, sign-in, and session length are excluded. Staff are not ranked by volume.',
@@ -176,16 +185,69 @@ function bucketOf(row, now, todayEnd) {
   return 'upcoming';
 }
 
+// A follow-up's status is fixed when the row is recorded. Only the open statuses
+// are commitments; every other status is a recorded outcome and is never outstanding.
 function wasOutstanding(row, dayEnd) {
+  if (!OPEN_FOLLOW_UP_STATUSES.includes(row.status)) return false;
   if (!row.createdAt || new Date(row.createdAt).getTime() > dayEnd.getTime()) return false;
   if (row.completedAt && new Date(row.completedAt).getTime() <= dayEnd.getTime()) return false;
   if (row.cancelledAt && new Date(row.cancelledAt).getTime() <= dayEnd.getTime()) return false;
   return true;
 }
 
-function wasOverdue(row, dayEnd) {
-  if (!wasOutstanding(row, dayEnd) || !row.scheduledAt) return false;
-  return new Date(row.scheduledAt).getTime() <= dayEnd.getTime();
+function hasKey(value, key) {
+  return Boolean(value) && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function asDate(value) {
+  if (value == null || value === '') return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// The scheduled time a row had at dayEnd. Later edits only change the stored row,
+// so recorded follow_up_updated audits are used to recover the earlier value.
+// Legacy audits stored only the value after the edit, so some rows stay unknown.
+function scheduledAtAsOf(row, dayEnd, updates) {
+  const list = (updates && updates.get(String(row._id))) || [];
+  const cutoff = dayEnd.getTime();
+  const earlier = list.filter((audit) => new Date(audit.createdAt).getTime() <= cutoff);
+  const later = list.filter((audit) => new Date(audit.createdAt).getTime() > cutoff);
+  if (!later.length) return { value: asDate(row.scheduledAt), known: true, rescheduledLater: false };
+  const lastEarlier = earlier[earlier.length - 1];
+  if (lastEarlier && hasKey(lastEarlier.after, 'scheduledAt')) {
+    return { value: asDate(lastEarlier.after.scheduledAt), known: true, rescheduledLater: true };
+  }
+  if (hasKey(later[0].before, 'scheduledAt')) {
+    return { value: asDate(later[0].before.scheduledAt), known: true, rescheduledLater: true };
+  }
+  return { value: asDate(row.scheduledAt), known: false, rescheduledLater: true };
+}
+
+function wasOverdue(row, dayEnd, updates) {
+  if (!wasOutstanding(row, dayEnd)) return false;
+  const scheduled = scheduledAtAsOf(row, dayEnd, updates).value;
+  if (!scheduled) return false;
+  return scheduled.getTime() <= dayEnd.getTime();
+}
+
+async function loadScheduleUpdates(rows) {
+  const open = rows.filter((row) => OPEN_FOLLOW_UP_STATUSES.includes(row.status));
+  if (!open.length) return new Map();
+  const consultancyIds = [...new Set(open.map((row) => String(row.consultancyId)))];
+  const audits = await CrmAuditLog.find({
+    entityType: 'consultancy',
+    entityId: { $in: consultancyIds },
+    action: 'consultancy.follow_up_updated',
+    'after.followUpId': { $in: open.map((row) => String(row._id)) },
+  }).sort({ createdAt: 1, _id: 1 }).select('createdAt before after').lean();
+  const updates = new Map();
+  audits.forEach((audit) => {
+    const key = String(audit.after.followUpId);
+    if (!updates.has(key)) updates.set(key, []);
+    updates.get(key).push(audit);
+  });
+  return updates;
 }
 
 function inWindow(value, start, end) {
@@ -236,7 +298,7 @@ function named(actor, names) {
 }
 
 async function resolveListScope(actor, consultancyId) {
-  const assigned = await assignedConsultancyIds(actor);
+  const assigned = await reportingConsultancyIds(actor);
   if (!consultancyId) return { consultancyIds: assigned, constrained: false };
   const selected = String(consultancyId);
   if (assigned != null && !assigned.some((id) => String(id) === selected)) {
@@ -248,7 +310,10 @@ async function resolveListScope(actor, consultancyId) {
   };
 }
 
-function aggregateIds(actor, listIds) {
+// Organization-wide readers still get module totals when unfiltered.
+// A consultancyId filter must constrain totals and lists the same way.
+function aggregateIds(actor, listIds, constrained = false) {
+  if (constrained) return listIds;
   if (listIds == null || moduleAggregates(actor)) return null;
   return listIds;
 }
@@ -306,13 +371,13 @@ function completionTrend(rows, range) {
     .map(([day, count]) => ({ day, count, exact: true }));
 }
 
-function approximateOverdueTrend(rows, range) {
+function approximateOverdueTrend(rows, range, updates) {
   if (!rows.length) return [];
   const points = [];
   let cursor = range.from;
   while (cursor && cursor <= range.to) {
     const day = resolveAnalyticsRange({ period: 'custom', from: cursor, to: cursor, timeZone: range.timeZone });
-    const count = rows.filter((row) => wasOverdue(row, day.end)).length;
+    const count = rows.filter((row) => wasOverdue(row, day.end, updates)).length;
     if (count > 0) points.push({ day: cursor, count, exact: false });
     const next = shiftDateKey(cursor, 1);
     if (next === cursor) break;
@@ -321,11 +386,14 @@ function approximateOverdueTrend(rows, range) {
   return points;
 }
 
-function basePayload(listScope, aggregateScope, range) {
+function basePayload(listScope, aggregateScope, range, actor) {
+  const recordScope = listScope.consultancyIds == null ? 'module' : 'assigned';
   return {
     generatedAt: new Date(),
-    scope: listScope.consultancyIds == null ? 'module' : 'assigned',
+    scope: recordScope,
+    recordScope: listScope.constrained ? 'consultancy' : recordScope,
     aggregateScope,
+    scopeBasis: reportingScopeBasis(actor),
     timeZone: range.timeZone,
     timeZoneConfirmed: false,
     excluded: ['presence', 'working time', 'productivity', 'staff ranking', 'conversion'],
@@ -345,7 +413,7 @@ async function listFollowUpIntelligence(actor, query, now = new Date()) {
   const userId = optionalId(query, 'userId', 'User id');
   const consultancyId = optionalId(query, 'consultancyId', 'Consultancy id');
   const listScope = await resolveListScope(actor, consultancyId);
-  const wideIds = aggregateIds(actor, listScope.consultancyIds);
+  const wideIds = aggregateIds(actor, listScope.consultancyIds, listScope.constrained);
   const userAssignments = userId ? await activeAssignedIds(userId) : null;
   const totalIds = userAssignments ? intersectIds(wideIds, userAssignments) : wideIds;
   const itemIds = userAssignments ? intersectIds(listScope.consultancyIds, userAssignments) : listScope.consultancyIds;
@@ -380,7 +448,7 @@ async function listFollowUpIntelligence(actor, query, now = new Date()) {
   ]));
   const aggregateScope = listScope.constrained ? 'consultancy' : (wideIds == null ? 'module' : 'assigned');
   return {
-    ...basePayload(listScope, aggregateScope, range),
+    ...basePayload(listScope, aggregateScope, range, actor),
     range: { from: range.from, to: range.to, start: range.start, end: range.end },
     comparison: previousWindow ? {
       start: previousWindow.start,
@@ -396,7 +464,7 @@ async function listFollowUpIntelligence(actor, query, now = new Date()) {
       completion,
     },
     completionTrend: completionTrend(totals.rows, range),
-    overdueApproximation: approximateOverdueTrend(totals.rows, range),
+    overdueApproximation: approximateOverdueTrend(totals.rows, range, await loadScheduleUpdates(totals.rows)),
     truncated: totals.truncated || listed.truncated,
     page,
     limit,
@@ -453,21 +521,28 @@ function admissionFacts(rows) {
       studentId: String(row.entityId),
       actor: storedActor(row.actorCrmUserId, row.actorAdminId),
       exception: change.next === 'Not proceeding',
+      exceptionReason: change.next === 'Not proceeding' ? 'not_proceeding' : null,
+      severity: change.next === 'Not proceeding' ? 'high' : null,
     });
   });
   return facts;
 }
 
 function approximateEnd(rows) {
+  const notes = {
+    openStatuses: OPEN_FOLLOW_UP_STATUSES,
+    rescheduledLater: rows.rescheduledLater || 0,
+    scheduleUnknown: rows.scheduleUnknown || 0,
+  };
   if (!rows.examined || rows.truncated) {
     return {
-      outstanding: { count: null, exact: false },
-      overdue: { count: null, exact: false },
+      outstanding: { count: null, exact: false, ...notes },
+      overdue: { count: null, exact: false, ...notes },
     };
   }
   return {
-    outstanding: { count: rows.outstanding, exact: false },
-    overdue: { count: rows.overdue, exact: false },
+    outstanding: { count: rows.outstanding, exact: false, ...notes },
+    overdue: { count: rows.overdue, exact: false, ...notes },
   };
 }
 
@@ -476,19 +551,26 @@ async function endState(ids, dayEnd) {
   if (!any) return { examined: false, outstanding: null, overdue: null, rows: [] };
   const rows = await CrmConsultancyFollowUp.find({
     ...consultancyFilter(ids),
+    status: { $in: OPEN_FOLLOW_UP_STATUSES },
     createdAt: { $lte: dayEnd },
     $and: [
       { $or: [{ completedAt: null }, { completedAt: { $gt: dayEnd } }] },
       { $or: [{ cancelledAt: null }, { cancelledAt: { $gt: dayEnd } }] },
     ],
-  }).limit(SOURCE_CAP + 1).lean();
-  const kept = rows.slice(0, SOURCE_CAP);
+  }).sort({ createdAt: 1, _id: 1 }).limit(SOURCE_CAP + 1).lean();
+  const kept = rows.slice(0, SOURCE_CAP).filter((row) => wasOutstanding(row, dayEnd));
+  const updates = await loadScheduleUpdates(kept);
+  const schedules = new Map(kept.map((row) => [String(row._id), scheduledAtAsOf(row, dayEnd, updates)]));
   return {
     examined: true,
     truncated: rows.length > SOURCE_CAP,
-    outstanding: kept.filter((row) => wasOutstanding(row, dayEnd)).length,
-    overdue: kept.filter((row) => wasOverdue(row, dayEnd)).length,
-    rows: kept.filter((row) => wasOutstanding(row, dayEnd)),
+    outstanding: kept.length,
+    overdue: kept.filter((row) => wasOverdue(row, dayEnd, updates)).length,
+    rescheduledLater: [...schedules.values()].filter((item) => item.rescheduledLater).length,
+    scheduleUnknown: [...schedules.values()].filter((item) => !item.known).length,
+    rows: kept,
+    updates,
+    schedules,
   };
 }
 
@@ -501,16 +583,17 @@ async function listDayEndReport(actor, query) {
     throw new CrmError(400, 'event must be admission, assignment, follow_up, or exception.', 'invalid_query');
   }
   const userId = optionalId(query, 'userId', 'User id');
+  const actorId = optionalId(query, 'actorId', 'Actor id');
   const consultancyId = optionalId(query, 'consultancyId', 'Consultancy id');
   const listScope = await resolveListScope(actor, consultancyId);
-  const wideIds = aggregateIds(actor, listScope.consultancyIds);
+  const wideIds = aggregateIds(actor, listScope.consultancyIds, listScope.constrained);
   const totalIds = userId ? await assignmentIdsAt(userId, range.end, wideIds) : wideIds;
   const itemIds = userId ? await assignmentIdsAt(userId, range.end, listScope.consultancyIds) : listScope.consultancyIds;
-  const [totalAudits, listAudits, totalFollowUps, listFollowUps, totalEnd, listEnd, opened, revoked, listOpened, listRevoked] = await Promise.all([
+  const [totalAudits, listAudits, totalFollowUps, listFollowUpsRaw, totalEnd, listEnd, opened, revoked, listOpened, listRevoked] = await Promise.all([
     loadAudits(totalIds, range),
     loadAudits(itemIds, range),
     CrmConsultancyFollowUp.find({ ...consultancyFilter(totalIds), createdAt: { $gte: range.start, $lte: range.end } }).limit(SOURCE_CAP + 1).lean(),
-    CrmConsultancyFollowUp.find({ ...consultancyFilter(itemIds), createdAt: { $gte: range.start, $lte: range.end } }).lean(),
+    CrmConsultancyFollowUp.find({ ...consultancyFilter(itemIds), createdAt: { $gte: range.start, $lte: range.end } }).limit(SOURCE_CAP + 1).lean(),
     endState(totalIds, range.end),
     endState(itemIds, range.end),
     CrmConsultancyAssignment.find({ ...consultancyFilter(totalIds), createdAt: { $gte: range.start, $lte: range.end } }).lean(),
@@ -518,6 +601,7 @@ async function listDayEndReport(actor, query) {
     CrmConsultancyAssignment.find({ ...consultancyFilter(itemIds), createdAt: { $gte: range.start, $lte: range.end } }).lean(),
     CrmConsultancyAssignment.find({ ...consultancyFilter(itemIds), revokedAt: { $gte: range.start, $lte: range.end } }).lean(),
   ]);
+  const listFollowUps = listFollowUpsRaw.slice(0, SOURCE_CAP);
   const due = await CrmConsultancyFollowUp.find({
     ...consultancyFilter(totalIds),
     scheduledAt: { $gte: range.start, $lte: range.end },
@@ -532,8 +616,13 @@ async function listDayEndReport(actor, query) {
   }).lean();
   const admissions = admissionFacts(totalAudits.rows);
   const summary = {
-    studentsCreated: admissions.filter((row) => row.kind === 'student.created').length,
-    admissionChanges: admissions.filter((row) => row.kind === 'admission.changed').length,
+    // Truncated audit scans must not present understated admission KPIs as complete counts.
+    studentsCreated: totalAudits.truncated
+      ? null
+      : admissions.filter((row) => row.kind === 'student.created').length,
+    admissionChanges: totalAudits.truncated
+      ? null
+      : admissions.filter((row) => row.kind === 'admission.changed').length,
     assignmentsOpened: opened.length,
     assignmentsRevoked: revoked.length,
     followUpsCreated: totalFollowUps.length > SOURCE_CAP ? null : totalFollowUps.length,
@@ -563,6 +652,8 @@ async function listDayEndReport(actor, query) {
     userId: String(row.crmUserId),
     actor: storedActor(row.revokedByCrmUserId, row.revokedByAdminId),
     exception: true,
+    exceptionReason: 'assignment_revoked',
+    severity: 'medium',
   }));
   listFollowUps.forEach((row) => items.push({
     id: String(row._id),
@@ -570,26 +661,43 @@ async function listDayEndReport(actor, query) {
     kind: 'follow_up.created',
     at: row.createdAt,
     consultancyId: String(row.consultancyId),
+    status: row.status || null,
+    outcome: row.outcome || '',
+    nextAction: row.nextAction || '',
     actor: storedActor(row.createdByCrmUserId, row.createdByAdminId),
   }));
-  (listEnd.rows || []).forEach((row) => items.push({
-    id: `${row._id}:outstanding`,
-    source: 'crmConsultancyFollowUps',
-    kind: wasOverdue(row, range.end) ? 'follow_up.overdue_approximate' : 'follow_up.outstanding_approximate',
-    at: row.scheduledAt || row.createdAt,
-    consultancyId: String(row.consultancyId),
-    exact: false,
-    actor: storedActor(row.createdByCrmUserId, row.createdByAdminId),
-  }));
+  (listEnd.rows || []).forEach((row) => {
+    const schedule = listEnd.schedules.get(String(row._id));
+    items.push({
+      id: `${row._id}:outstanding`,
+      source: 'crmConsultancyFollowUps',
+      kind: wasOverdue(row, range.end, listEnd.updates) ? 'follow_up.overdue_approximate' : 'follow_up.outstanding_approximate',
+      at: (schedule && schedule.value) || row.createdAt,
+      consultancyId: String(row.consultancyId),
+      status: row.status,
+      outcome: row.outcome || '',
+      nextAction: row.nextAction || '',
+      exact: false,
+      scheduleKnown: schedule ? schedule.known : true,
+      rescheduledLater: schedule ? schedule.rescheduledLater : false,
+      actor: storedActor(row.createdByCrmUserId, row.createdByAdminId),
+    });
+  });
   completed.filter((row) => !itemIds || itemIds.some((id) => String(id) === String(row.consultancyId))).forEach((row) => {
+    const late = Boolean(row.scheduledAt && new Date(row.completedAt).getTime() > new Date(row.scheduledAt).getTime());
     items.push({
       id: `${row._id}:completed`,
       source: 'crmConsultancyFollowUps',
       kind: 'follow_up.completed',
       at: row.completedAt,
       consultancyId: String(row.consultancyId),
+      status: row.status || null,
+      outcome: row.outcome || '',
+      nextAction: row.nextAction || '',
       actor: storedActor(row.completedByCrmUserId, row.completedByAdminId),
-      exception: Boolean(row.scheduledAt && new Date(row.completedAt).getTime() > new Date(row.scheduledAt).getTime()),
+      exception: late,
+      exceptionReason: late ? 'completed_after_schedule' : null,
+      severity: late ? 'medium' : null,
     });
   });
   cancelled.filter((row) => !itemIds || itemIds.some((id) => String(id) === String(row.consultancyId))).forEach((row) => {
@@ -599,16 +707,22 @@ async function listDayEndReport(actor, query) {
       kind: 'follow_up.cancelled',
       at: row.cancelledAt,
       consultancyId: String(row.consultancyId),
+      status: row.status || null,
+      outcome: row.outcome || '',
+      nextAction: row.nextAction || '',
       actor: storedActor(row.cancelledByCrmUserId, row.cancelledByAdminId),
       exception: true,
+      exceptionReason: 'follow_up_cancelled',
+      severity: 'medium',
     });
   });
   const filtered = items.filter((row) => {
+    if (actorId && (!row.actor || String(row.actor.id) !== String(actorId))) return false;
     if (!event) return true;
     if (event === 'admission') return row.kind === 'student.created' || row.kind === 'admission.changed';
     if (event === 'assignment') return row.kind.startsWith('assignment.');
     if (event === 'follow_up') return row.kind.startsWith('follow_up.');
-    return row.exception === true || row.kind === 'admission.changed' && row.nextStatus === 'Not proceeding';
+    return row.exception === true || (row.kind === 'admission.changed' && row.nextStatus === 'Not proceeding');
   });
   filtered.sort((left, right) => new Date(right.at) - new Date(left.at) || String(left.id).localeCompare(String(right.id)));
   const pageItems = pageSlice(filtered, page, limit);
@@ -621,12 +735,22 @@ async function listDayEndReport(actor, query) {
   const actorNames = await namesFor(pageItems.map((row) => row.actor));
   const aggregateScope = listScope.constrained ? 'consultancy' : (wideIds == null ? 'module' : 'assigned');
   return {
-    ...basePayload(listScope, aggregateScope, range),
+    ...basePayload(listScope, aggregateScope, range, actor),
     date: range.from,
     exactSnapshot: false,
     range: { from: range.from, to: range.to, start: range.start, end: range.end },
     summary,
-    truncated: Boolean(totalAudits.truncated || listAudits.truncated || totalEnd.truncated || totalFollowUps.length > SOURCE_CAP),
+    truncated: Boolean(
+      totalAudits.truncated
+      || listAudits.truncated
+      || totalEnd.truncated
+      || totalFollowUps.length > SOURCE_CAP
+      || listFollowUpsRaw.length > SOURCE_CAP
+    ),
+    filters: {
+      userIdMeaning: 'Consultancies assigned to this CRM user at the reporting day end. Not the actor who recorded each event.',
+      actorIdMeaning: 'Recorded actor on the event. Independent of assignment scope.',
+    },
     page,
     limit,
     total: filtered.length,
@@ -646,7 +770,7 @@ async function listWorkload(actor, query, now = new Date()) {
   const userId = optionalId(query, 'userId', 'User id');
   const consultancyId = optionalId(query, 'consultancyId', 'Consultancy id');
   const listScope = await resolveListScope(actor, consultancyId);
-  const wideIds = aggregateIds(actor, listScope.consultancyIds);
+  const wideIds = aggregateIds(actor, listScope.consultancyIds, listScope.constrained);
   const scopeIds = wideIds == null ? null : wideIds;
   const assignmentFilter = { revokedAt: null, ...consultancyFilter(scopeIds) };
   if (userId) assignmentFilter.crmUserId = userId;
@@ -693,7 +817,7 @@ async function listWorkload(actor, query, now = new Date()) {
   const pageItems = pageSlice(staff, page, limit);
   const aggregateScope = listScope.constrained ? 'consultancy' : (wideIds == null ? 'module' : 'assigned');
   return {
-    ...basePayload(listScope, aggregateScope, range),
+    ...basePayload(listScope, aggregateScope, range, actor),
     range: { from: range.from, to: range.to, start: range.start, end: range.end },
     ranked: false,
     truncated: truncated || audits.truncated,
@@ -711,4 +835,5 @@ module.exports = {
   bucketOf,
   wasOverdue,
   completionCohort,
+  setSourceCapForTests,
 };

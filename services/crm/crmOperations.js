@@ -8,15 +8,17 @@ const CrmStudent = require('../../models/CrmStudent');
 const CrmUser = require('../../models/CrmUser');
 const { ADMISSION_STATUSES, CONSULTANCY_STATUS } = require('../../constants/crm');
 const { PRESENCE_ONLINE_MS } = require('../../constants/crmPresence');
-const { CRM_ACCESS_SECTION } = require('../../constants/crmUsers');
+const { CRM_ACCESS_SECTION, CRM_ROLES } = require('../../constants/crmUsers');
 const { CrmError } = require('../../utils/crmError');
-const { parseObjectId, parsePageLimit } = require('../../utils/crmHttp');
+const { escapeRegex, parseObjectId, parsePageLimit } = require('../../utils/crmHttp');
 const { previousBounds, resolveAnalyticsRange } = require('../../utils/crmRange');
 const { referralVolume, statusCounts } = require('./analyticsService');
 const { activityScope, canViewAccountSecurity } = require('./activityService');
-const { assignedConsultancyIds } = require('./crmAccess');
+const { reportingConsultancyIds, reportingScopeBasis } = require('./crmAccess');
 
-const OVERVIEW_KEYS = Object.freeze(['page', 'limit', 'status', 'assignment', 'consultancyId']);
+const OVERVIEW_KEYS = Object.freeze(['page', 'limit', 'status', 'assignment', 'consultancyId', 'q', 'userId', 'sort']);
+const OVERVIEW_SORTS = Object.freeze(['name', 'assignees', 'updated']);
+const STAFF_DISTRIBUTION_LIMIT = 8;
 const OPERATION_KEYS = Object.freeze(['page', 'limit', 'period', 'from', 'to', 'timeZone', 'consultancyId']);
 const LIMITATIONS = Object.freeze([
   'Admission status is the current value on the student. Earlier statuses are not stored.',
@@ -82,7 +84,7 @@ async function statusesWithoutReferral() {
 }
 
 async function resolveScope(actor, consultancyId) {
-  const assigned = await assignedConsultancyIds(actor);
+  const assigned = await reportingConsultancyIds(actor);
   if (!consultancyId) return { ids: assigned, moduleWide: assigned == null, constrained: false };
   const parsed = parseObjectId(consultancyId, 'Consultancy id');
   if (assigned != null && !assigned.some((id) => String(id) === String(parsed))) {
@@ -231,6 +233,103 @@ async function securityCounts(actor, range, consultancyId) {
   };
 }
 
+function overviewSearch(value) {
+  if (value == null || value === '') return '';
+  if (typeof value !== 'string') throw new CrmError(400, 'q is not valid.', 'invalid_query');
+  const text = value.trim();
+  if (text.length > 100) throw new CrmError(400, 'Search text is too long.', 'invalid_query');
+  return text;
+}
+
+function restrictIds(current, allowedIds) {
+  const allowed = new Set(allowedIds.map(String));
+  if (!current) return { $in: allowedIds };
+  if (current.$in) return { $in: current.$in.filter((id) => allowed.has(String(id))) };
+  if (current.$nin) {
+    const blocked = new Set(current.$nin.map(String));
+    return { $in: allowedIds.filter((id) => !blocked.has(String(id))) };
+  }
+  return current;
+}
+
+async function overviewPage(filter, sort, skip, limit) {
+  const fields = { name: 1, status: 1, createdAt: 1, updatedAt: 1 };
+  if (sort === 'assignees') {
+    return CrmConsultancy.aggregate([
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'crmConsultancyAssignments',
+          let: { cid: '$_id' },
+          pipeline: [
+            { $match: { $expr: { $and: [{ $eq: ['$consultancyId', '$$cid'] }, { $eq: [{ $ifNull: ['$revokedAt', null] }, null] }] } } },
+            { $project: { _id: 1 } },
+          ],
+          as: 'active',
+        },
+      },
+      { $addFields: { activeCount: { $size: '$active' } } },
+      { $sort: { activeCount: -1, name: 1, _id: 1 } },
+      { $skip: skip },
+      { $limit: limit },
+      { $project: fields },
+    ]);
+  }
+  const order = sort === 'updated' ? { updatedAt: -1, _id: 1 } : { name: 1, _id: 1 };
+  return CrmConsultancy.find(filter).sort(order).skip(skip).limit(limit).select(fields).lean();
+}
+
+// Organization-wide totals for callers that may read every consultancy. They ignore
+// the list filters so the page can show them beside the filtered result count.
+async function organizationSummary() {
+  const [total, active, inactive, staffRows] = await Promise.all([
+    CrmConsultancy.countDocuments({ deletedAt: null }),
+    CrmConsultancy.countDocuments({ deletedAt: null, status: 'active' }),
+    CrmConsultancy.countDocuments({ deletedAt: null, status: 'inactive' }),
+    CrmConsultancyAssignment.aggregate([
+      { $match: { revokedAt: null } },
+      {
+        $lookup: {
+          from: 'crmConsultancies',
+          localField: 'consultancyId',
+          foreignField: '_id',
+          as: 'consultancy',
+        },
+      },
+      { $match: { 'consultancy.deletedAt': null, 'consultancy.0': { $exists: true } } },
+      { $group: { _id: '$crmUserId', consultancies: { $addToSet: '$consultancyId' } } },
+    ]),
+  ]);
+  const assignedIds = new Set();
+  staffRows.forEach((row) => row.consultancies.forEach((id) => assignedIds.add(String(id))));
+  const ranked = staffRows
+    .map((row) => ({ userId: String(row._id), consultancies: row.consultancies.length }))
+    .sort((left, right) => right.consultancies - left.consultancies || left.userId.localeCompare(right.userId));
+  const top = ranked.slice(0, STAFF_DISTRIBUTION_LIMIT);
+  const people = top.length
+    ? await CrmUser.find({ _id: { $in: top.map((row) => row.userId) } }).select('fullName status').lean()
+    : [];
+  const byId = new Map(people.map((row) => [String(row._id), row]));
+  return {
+    scope: 'organization',
+    meaning: 'Every non-deleted consultancy, ignoring the list filters.',
+    total,
+    active,
+    inactive,
+    assigned: assignedIds.size,
+    unassigned: Math.max(total - assignedIds.size, 0),
+    staffAssigned: staffRows.length,
+    staffMeaning: 'CRM accounts holding at least one active assignment on a non-deleted consultancy.',
+    staff: top.map((row) => ({
+      userId: row.userId,
+      fullName: byId.has(row.userId) ? byId.get(row.userId).fullName : '',
+      status: byId.has(row.userId) ? byId.get(row.userId).status : null,
+      consultancies: row.consultancies,
+    })),
+    staffTruncated: ranked.length > top.length,
+  };
+}
+
 async function listConsultancyOverview(actor, query) {
   assertKeys(query, OVERVIEW_KEYS, 'overview');
   const { page, limit, skip } = parsePageLimit(query);
@@ -248,10 +347,19 @@ async function listConsultancyOverview(actor, query) {
     }
     status = query.status;
   }
+  const sort = query.sort == null || query.sort === '' ? 'name' : String(query.sort);
+  if (!OVERVIEW_SORTS.includes(sort)) {
+    throw new CrmError(400, 'sort must be name, assignees, or updated.', 'invalid_query');
+  }
+  const q = overviewSearch(query.q);
+  const staffId = query.userId == null || query.userId === '' ? null : parseObjectId(String(query.userId), 'User id');
   const scope = await resolveScope(actor, query.consultancyId);
+  const organizationView = !scope.constrained && (scope.moduleWide || canViewModuleAggregates(actor));
+  const showContact = reportingScopeBasis(actor) !== 'assignment';
   const filter = { deletedAt: null };
   if (scope.ids) filter._id = { $in: scope.ids };
   if (status) filter.status = status;
+  if (q) filter.name = new RegExp(escapeRegex(q), 'i');
   const activeAssignmentIds = await CrmConsultancyAssignment.find({ revokedAt: null }).distinct('consultancyId');
   if (assignment === 'assigned') {
     const allowed = new Set(activeAssignmentIds.map(String));
@@ -269,24 +377,37 @@ async function listConsultancyOverview(actor, query) {
       filter._id = { $nin: activeAssignmentIds };
     }
   }
+  if (staffId) {
+    const staffConsultancies = await CrmConsultancyAssignment.find({ crmUserId: staffId, revokedAt: null }).distinct('consultancyId');
+    filter._id = restrictIds(filter._id, staffConsultancies);
+  }
   const unassignedFilter = { deletedAt: null, _id: { $nin: activeAssignmentIds } };
   if (status) unassignedFilter.status = status;
-  const [items, total, unassignedConsultancies] = await Promise.all([
-    CrmConsultancy.find(filter).sort({ name: 1, _id: 1 }).skip(skip).limit(limit).select('name status').lean(),
+  const [items, total, unassignedConsultancies, summary] = await Promise.all([
+    overviewPage(filter, sort, skip, limit),
     CrmConsultancy.countDocuments(filter),
-    (!scope.constrained && (scope.moduleWide || canViewModuleAggregates(actor)))
-      ? CrmConsultancy.countDocuments(unassignedFilter)
-      : Promise.resolve(null),
+    organizationView ? CrmConsultancy.countDocuments(unassignedFilter) : Promise.resolve(null),
+    organizationView ? organizationSummary() : Promise.resolve(null),
   ]);
   const ids = items.map((row) => row._id);
-  const links = ids.length
-    ? await CrmConsultancyAssignment.find({ consultancyId: { $in: ids }, revokedAt: null })
-      .select('consultancyId crmUserId')
-      .lean()
-    : [];
+  const [links, studentRows] = await Promise.all([
+    ids.length
+      ? CrmConsultancyAssignment.find({ consultancyId: { $in: ids }, revokedAt: null })
+        .sort({ createdAt: 1, _id: 1 })
+        .select('consultancyId crmUserId createdAt')
+        .lean()
+      : [],
+    ids.length
+      ? CrmReferral.aggregate([
+        { $match: { consultancyId: { $in: ids } } },
+        { $group: { _id: '$consultancyId', count: { $sum: 1 } } },
+      ])
+      : [],
+  ]);
+  const studentsBy = new Map(studentRows.map((row) => [String(row._id), row.count]));
   const userIds = [...new Set(links.map((row) => String(row.crmUserId)))];
   const users = userIds.length
-    ? await CrmUser.find({ _id: { $in: userIds } }).select('fullName role status').lean()
+    ? await CrmUser.find({ _id: { $in: userIds } }).select('fullName email role status').lean()
     : [];
   const userById = new Map(users.map((row) => [String(row._id), row]));
   const byConsultancy = new Map();
@@ -303,14 +424,20 @@ async function listConsultancyOverview(actor, query) {
         id: String(row._id),
         name: row.name,
         status: row.status,
+        createdAt: row.createdAt || null,
+        updatedAt: row.updatedAt || null,
+        students: studentsBy.get(String(row._id)) || 0,
         activeAssignees: assignees.length,
         assignees: assignees.map((link) => {
           const user = userById.get(String(link.crmUserId));
           return {
             id: String(link.crmUserId),
             fullName: user ? user.fullName : '',
+            email: showContact && user ? user.email : null,
             role: user ? user.role : null,
+            roleLabel: user && CRM_ROLES[user.role] ? CRM_ROLES[user.role].label : null,
             status: user ? user.status : null,
+            assignedAt: link.createdAt || null,
           };
         }),
       };
@@ -318,7 +445,11 @@ async function listConsultancyOverview(actor, query) {
     page,
     limit,
     total,
-    sort: 'name_asc,id_asc',
+    sort: sort === 'assignees' ? 'active_assignees_desc,name_asc,id_asc' : (sort === 'updated' ? 'updated_desc,id_asc' : 'name_asc,id_asc'),
+    studentsMeaning: 'Students whose current referral points to this consultancy.',
+    recordScope: scope.constrained ? 'consultancy' : (scope.moduleWide ? 'module' : 'assigned'),
+    scopeBasis: reportingScopeBasis(actor),
+    summary,
     unassignedConsultancies,
     unassignedMeaning: scope.constrained
       ? 'Hidden because this response is limited to one consultancy.'
@@ -425,6 +556,8 @@ async function getOperations(actor, query, now = new Date()) {
     generatedAt: now,
     scope: scope.moduleWide ? 'module' : 'assigned',
     aggregateScope: totalsModule ? 'module' : 'assigned',
+    recordScope: scope.constrained ? 'consultancy' : (scope.moduleWide ? 'module' : 'assigned'),
+    scopeBasis: reportingScopeBasis(actor),
     limitations: LIMITATIONS,
     timeZone: range.timeZone,
     range: {

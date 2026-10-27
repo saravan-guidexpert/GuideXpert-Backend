@@ -509,8 +509,8 @@ describe('CRM activity timeline', { timeout: 180000, concurrency: 1 }, () => {
 
     const feedAdmin = await collectActivity({ jar: sessionAdmin.jar });
     assert.ok(feedAdmin.items.some((item) => item.action === 'crm_user.login_succeeded' && item.category === 'authentication'));
-    assert.equal(feedAdmin.items.some((item) => item.consultancyId === betaId), false);
-    assert.equal(JSON.stringify(feedAdmin.items).includes('Hidden Activity Student'), false);
+    assert.ok(feedAdmin.items.some((item) => item.consultancyId === betaId));
+    assert.ok(feedAdmin.items.some((item) => item.entityId === hidden.data.data.student.id));
     const staffFeed = await collectActivity({ token: staffToken });
     assert.equal(staffFeed.items.some((item) => item.action === 'crm_user.login_succeeded'), false);
     assert.equal(staffFeed.items.some((item) => item.action === 'crm_user.login_failed'), false);
@@ -632,13 +632,13 @@ describe('CRM activity timeline', { timeout: 180000, concurrency: 1 }, () => {
       jar: adminSession.jar,
     });
     assert.equal(overview.status, 200);
-    assert.equal(overview.data.data.total, 1);
-    assert.equal(overview.data.data.items.length, 1);
-    assert.equal(overview.data.data.items[0].name, 'Visible House');
-    assert.equal(overview.data.data.items[0].activeAssignees, 2);
-    assert.equal(overview.data.data.items[0].assignees.some((person) => person.fullName === 'History Manager'), true);
+    assert.equal(overview.data.data.total, 2);
+    assert.equal(overview.data.data.recordScope, 'module');
+    const visibleRow = overview.data.data.items.find((row) => row.name === 'Visible House');
+    assert.equal(visibleRow.activeAssignees, 2);
+    assert.equal(visibleRow.assignees.some((person) => person.fullName === 'History Manager'), true);
     assert.equal(overview.data.data.unassignedConsultancies, 1);
-    assert.equal(JSON.stringify(overview.data).includes('Hidden House'), false);
+    assert.equal(overview.data.data.items.find((row) => row.name === 'Hidden House').activeAssignees, 0);
 
     const outsiderOverview = await request('GET', '/api/crm/consultancies/overview?page=1&limit=20&assignment=unassigned', {
       jar: outsiderSession.jar,
@@ -660,7 +660,8 @@ describe('CRM activity timeline', { timeout: 180000, concurrency: 1 }, () => {
       `/api/crm/activity?page=1&limit=20&source=security&consultancyId=${hiddenId}`,
       { jar: adminSession.jar }
     );
-    assert.equal(hiddenHistory.status, 404);
+    assert.equal(hiddenHistory.status, 200);
+    assert.equal(hiddenHistory.data.data.recordScope, 'consultancy');
 
     const history = await request(
       'GET',
@@ -691,8 +692,9 @@ describe('CRM activity timeline', { timeout: 180000, concurrency: 1 }, () => {
     const managerNext = await request('GET', `/api/crm/consultancies/${visibleId}`, { jar: managerSession.jar });
     assert.equal(managerNext.status, 404);
     const after = await request('GET', '/api/crm/consultancies/overview?page=1&limit=20', { jar: adminSession.jar });
-    assert.equal(after.data.data.items[0].activeAssignees, 1);
-    assert.equal(after.data.data.items[0].assignees.some((person) => person.fullName === 'History Manager'), false);
+    const visibleAfter = after.data.data.items.find((row) => row.id === visibleId);
+    assert.equal(visibleAfter.activeAssignees, 1);
+    assert.equal(visibleAfter.assignees.some((person) => person.fullName === 'History Manager'), false);
     assert.equal(after.data.data.unassignedConsultancies, 1);
     const managerOverview = await request('GET', '/api/crm/consultancies/overview?page=1&limit=20', {
       jar: managerSession.jar,
