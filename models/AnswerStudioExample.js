@@ -70,6 +70,10 @@ const answerStudioExampleSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isTestData: {
+      type: Boolean,
+      default: false,
+    },
     approvedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Admin',
