@@ -87,6 +87,15 @@ const answerStudioGenerationSchema = new mongoose.Schema(
         message: 'promptVersion must be an integer',
       },
     },
+    promptSource: {
+      type: String,
+      enum: ['default', 'database'],
+    },
+    usage: {
+      promptTokens: { type: Number, min: 0 },
+      completionTokens: { type: Number, min: 0 },
+      totalTokens: { type: Number, min: 0 },
+    },
     generationVersion: {
       type: Number,
       required: true,

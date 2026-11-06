@@ -8,10 +8,12 @@ const {
 } = require('../controllers/answerStudioController');
 const knowledgeController = require('../controllers/answerStudioKnowledgeController');
 const exampleController = require('../controllers/answerStudioExampleController');
+const generationController = require('../controllers/answerStudioGenerationController');
 
 const router = express.Router();
 
 router.get('/status', getModuleStatus);
+router.post('/generate', generationController.generate);
 
 function superAdminManagement(scope) {
   const gate = express.Router({ mergeParams: true });
