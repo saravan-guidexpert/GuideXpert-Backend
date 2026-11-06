@@ -11,30 +11,36 @@ const answerStudioKnowledgeSchema = new mongoose.Schema(
       required: true,
       trim: true,
       minlength: 1,
-      maxlength: 300,
+      maxlength: 200,
     },
     body: {
       type: String,
       required: true,
       trim: true,
       minlength: 1,
-      maxlength: 20000,
+      maxlength: 50000,
     },
     sourceLabel: {
       type: String,
       trim: true,
-      maxlength: 256,
+      maxlength: 200,
       default: '',
     },
     category: {
       type: String,
       trim: true,
-      maxlength: 128,
+      maxlength: 100,
       default: '',
     },
     tags: {
-      type: [{ type: String, trim: true, maxlength: 64 }],
+      type: [{ type: String, trim: true, maxlength: 50 }],
       default: [],
+      validate: {
+        validator(value) {
+          return Array.isArray(value) && value.length <= 30;
+        },
+        message: 'tags must contain at most 30 items',
+      },
     },
     embedText: {
       type: String,
@@ -74,6 +80,10 @@ const answerStudioKnowledgeSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    isTestData: {
+      type: Boolean,
+      default: false,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Admin',
@@ -91,8 +101,8 @@ const answerStudioKnowledgeSchema = new mongoose.Schema(
   }
 );
 
-// Non-unique: the same text may be curated more than once (different source
-// or a kept historical row). Uniqueness would block that without a product rule.
+// Non-unique on purpose. Active duplicates are rejected in the knowledge service.
+// Inactive rows may share a hash so a fact can be recreated after deactivation.
 answerStudioKnowledgeSchema.index({ contentHash: 1 });
 answerStudioKnowledgeSchema.index({ active: 1, updatedAt: -1 });
 

@@ -148,10 +148,8 @@ describe('Answer Studio authorization', { timeout: 120000, concurrency: 1 }, () 
     }
   });
 
-  test('super admin passes every management gate and receives no stored data', async () => {
+  test('super admin passes example and prompt gates and receives no stored data', async () => {
     const paths = [
-      ['POST', '/api/admin/answer-studio/knowledge', 'knowledge'],
-      ['DELETE', '/api/admin/answer-studio/knowledge/507f1f77bcf86cd799439011', 'knowledge'],
       ['POST', '/api/admin/answer-studio/examples', 'examples'],
       ['POST', '/api/admin/answer-studio/examples/507f1f77bcf86cd799439011/approve', 'examples'],
       ['PATCH', '/api/admin/answer-studio/examples/507f1f77bcf86cd799439011', 'examples'],

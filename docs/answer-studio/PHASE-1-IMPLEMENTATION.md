@@ -2,6 +2,8 @@
 
 Phase 1 adds the MongoDB models, the admin section key, and the authorization shell for AI Answer Studio. It does not embed text, retrieve knowledge, or call the LLM.
 
+Phase 2A later added super-admin knowledge CRUD. Those routes, `isTestData`, and the knowledge field limits are documented in `PHASE-2A-KNOWLEDGE-CRUD.md`. Example and prompt routes are still the 501 gate described below.
+
 No production database command was run. No production deployment was performed. No prompts were seeded.
 
 ## Models and responsibilities
@@ -75,14 +77,14 @@ Mount, before the generic `/api/admin` router:
 
 `requireAdmin` → `requireAdminSection('answer-studio')` → `routes/answerStudioRoutes.js`
 
-| Caller | `GET /api/admin/answer-studio/status` | `/knowledge`, `/examples`, `/prompts` |
+| Caller | `GET /api/admin/answer-studio/status` | `/examples`, `/prompts` |
 |---|---|---|
 | No token | 401 | 401 |
 | Admin without `answer-studio` | 403 `section_forbidden` | 403 |
 | Admin with `answer-studio` | 200. Management flags are false. Generation flag is true, meaning future generation routes stay on this section gate. | 403 Super admin access required |
-| Super Admin | 200. Management flags are true. | 501. The gate passed. No collection is read or written. |
+| Super Admin | 200. Management flags are true. | 501. The gate passed. No example or prompt collection is read or written. |
 
-Super-admin management routes exist so the wall is in the router now. They return `implemented: false` and do not accept a body into storage. Knowledge writes, example approval, and prompt edits stay super-admin-only when those handlers are added behind the same `requireSuperAdmin` middleware.
+`/knowledge` is no longer a 501 route. See Phase 2A. Example approval and prompt edits stay super-admin-only behind `requireSuperAdmin`.
 
 Future generation history routes must stay on this mounted router. They must not be added to a public router or to `adminRoutes.js` without `requireAdminSection('answer-studio')`.
 
@@ -135,8 +137,8 @@ Local MongoDB and the memory server cannot serve `$vectorSearch`. Similarity met
 
 ## Known limitations
 
-- No create, update, list, import, embed, retrieve, or generate HTTP API.
-- Super-admin management URLs answer 501. They are authorization boundaries, not editors.
+- Example and prompt URLs still answer 501. Knowledge CRUD is Phase 2A.
+- There is still no import, embed, retrieve, or generate HTTP API.
 - `activatePrompt` is callable from server code only.
 - Token usage is still not returned by `OpenAiCompatibleProvider`. This phase does not change that provider.
 - The admin UI can grant `answer-studio` from Manage Admins. The section has no page yet, so the grant has no screen until a later phase.

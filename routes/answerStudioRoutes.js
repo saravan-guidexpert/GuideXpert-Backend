@@ -6,6 +6,7 @@ const {
   getModuleStatus,
   managementNotImplemented,
 } = require('../controllers/answerStudioController');
+const knowledgeController = require('../controllers/answerStudioKnowledgeController');
 
 const router = express.Router();
 
@@ -18,9 +19,12 @@ function superAdminManagement(scope) {
   return gate;
 }
 
-// Mounted so later phases add handlers behind the same super-admin wall.
-// These routes do not read or write Answer Studio collections.
-router.use('/knowledge', superAdminManagement('knowledge'));
+router.post('/knowledge', requireSuperAdmin, knowledgeController.create);
+router.get('/knowledge', requireSuperAdmin, knowledgeController.list);
+router.get('/knowledge/:id', requireSuperAdmin, knowledgeController.getOne);
+router.patch('/knowledge/:id', requireSuperAdmin, knowledgeController.update);
+router.delete('/knowledge/:id', requireSuperAdmin, knowledgeController.deactivate);
+
 router.use('/examples', superAdminManagement('examples'));
 router.use('/prompts', superAdminManagement('prompts'));
 
