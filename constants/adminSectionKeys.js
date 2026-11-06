@@ -46,6 +46,8 @@ const ADMIN_SECTION_KEYS = [
   'resources',
   'settings',
   'system-prompt',
+  // Registered before the admin sidebar entry. Navigation is a later phase.
+  'answer-studio',
   CRM_SECTION,
   CRM_MANAGER_SECTION,
   CRM_ACCESS_SECTION,
