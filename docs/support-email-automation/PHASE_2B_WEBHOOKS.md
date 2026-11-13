@@ -52,7 +52,7 @@ Microsoft Graph Webhooks provide asynchronous wake-up signals whenever email mes
                                             ┌───────────────────────────────────────┐
                                             │ deltaSyncService (Phase 2A)           │
                                             │ - Follow @odata.deltaLink             │
-                                            │ - Fetch full message with ImmutableId │
+                                            │ - Normalize & dedupe via MsgId        │
                                             │ - Ingest idempotently into DB         │
                                             └───────────────────────────────────────┘
 ```
@@ -230,7 +230,7 @@ Microsoft Graph subscriptions for Outlook message resources have a hard maximum 
 
 ## 9. Scheduled Reconciliation Engine
 
-The scheduled reconciliation engine (`services/supportEmail/reconciliationService.js`) provides a self-healing fallback guaranteeing zero message loss even if webhooks fail entirely:
+The scheduled reconciliation engine (`services/supportEmail/reconciliationService.js`) provides a scheduled polling safety net to recover unobserved messages if webhooks are delayed, dropped, or unconfigured:
 
 - **Endpoint:** `ALL /api/cron/support-email-reconcile`
 - **Protection:** `verifyCronSecret` (requires `CRON_SECRET` or `GUIDEXPERT_CRON_SECRET` via Bearer token, header, or query key).
@@ -252,12 +252,17 @@ The scheduled reconciliation engine (`services/supportEmail/reconciliationServic
 
 ---
 
-## 11. Security Considerations
+## 11. Security & Identifier Consistency Considerations
 
-- **Timing Attack Mitigation:** Constant-time buffer comparison (`crypto.timingSafeEqual`) ensures malicious actors cannot deduce `clientState` characters through timing discrepancies.
-- **Hash at Rest:** The SHA-256 hash of `clientState` is indexed and stored in `GraphSubscription.clientStateHash`.
-- **Zero Token Leakage:** Authentication headers and validation tokens are redacted from operational error logs.
-- **RBAC Custom Resource Scopes:** As established in Phase 2A, the application operates strictly within Exchange Online RBAC for Applications assigned to the designated support mailbox, preventing tenant-wide mailbox access.
+- **Zero Plaintext at Rest (`clientState`):** The shared secret `clientState` is held in memory only during subscription creation and is **never** persisted to MongoDB. Only its cryptographic hash (`clientStateHash`) is retained in `GraphSubscription`.
+- **Keyed HMAC Support:** The system computes and verifies `clientStateHash` using a keyed HMAC via `MS_GRAPH_CLIENT_STATE_SECRET` when configured, with seamless backward-compatible fallback to SHA-256.
+- **Timing Attack Mitigation:** Constant-time buffer comparison (`timingSafeCompare` using `crypto.timingSafeEqual`) ensures malicious actors cannot deduce `clientState` characters through timing discrepancies.
+- **Zero Token Leakage:** Authentication headers, validation tokens, and `clientState` are never exposed in error logs, API responses, or diagnostic metadata.
+- **RBAC Custom Resource Scopes:** The application operates strictly within Exchange Online RBAC for Applications assigned to the designated support mailbox, preventing tenant-wide mailbox access.
+- **Message Identifier Consistency:**
+  - Graph webhook notifications deliver minimal `resourceData.id` identifiers representing ordinary Graph message IDs. These are strictly used for webhook event deduplication and are never mistaken for immutable IDs.
+  - The authoritative delta sync engine (`deltaSyncService`) normalizes incoming messages and leverages RFC 2822/5322 `internetMessageId` with a partial unique index (`internetMessageId_1_unique_partial`).
+  - When messages move between folders or return to the Inbox with a new ordinary Graph ID, the immutable RFC 2822 `internetMessageId` safely updates the existing `SupportEmail` document without creating duplicate tickets or running destructive mutations.
 
 ---
 
@@ -266,7 +271,8 @@ The scheduled reconciliation engine (`services/supportEmail/reconciliationServic
 | Variable | Required in Phase 2B | Description | Example |
 |---|---|---|---|
 | `MS_GRAPH_WEBHOOK_URL` | Yes (Production) | Public HTTPS URL for Graph notifications | `https://api.guidexpert.com/api/support-email/webhooks/graph` |
-| `MS_GRAPH_LIFECYCLE_URL` | Optional | Public HTTPS URL for Graph lifecycle events | `https://api.guidexpert.com/api/support-email/webhooks/graph` |
+| `MS_GRAPH_LIFECYCLE_URL` | Optional | Public HTTPS URL for Graph lifecycle events | `https://api.guidexpert.com/api/support-email/webhooks/graph/lifecycle` |
+| `MS_GRAPH_CLIENT_STATE_SECRET` | Optional (Recommended) | Key for HMAC hashing of clientState secrets | `sec_hmac_graph_state_4f8a...` |
 | `CRON_SECRET` | Yes | Shared secret for securing cron endpoints | `sec_cron_live_7a8b9c...` |
 | `GUIDEXPERT_CRON_SECRET` | Optional | Fallback secret for cron endpoints | `sec_cron_live_7a8b9c...` |
 | `MS_GRAPH_TENANT_ID` | Yes | Azure AD Tenant ID | `d16c5264-b81b-4d43-...` |
@@ -296,9 +302,13 @@ Add the following cron definition to `vercel.json`:
 
 ### Testing Handshake via cURL
 ```bash
-# Test validation handshake
-curl -i "http://localhost:5000/api/support-email/webhooks/graph?validationToken=test-token-12345"
+# Test validation handshake (POST method as issued by Microsoft Graph)
+curl -X POST -i "http://localhost:5000/api/support-email/webhooks/graph?validationToken=test-token-12345"
 # Expected: HTTP 200 OK, Content-Type: text/plain, Body: test-token-12345
+
+# Test validation handshake on dedicated lifecycle endpoint
+curl -X POST -i "http://localhost:5000/api/support-email/webhooks/graph/lifecycle?validationToken=lifecycle-token-67890"
+# Expected: HTTP 200 OK, Content-Type: text/plain, Body: lifecycle-token-67890
 ```
 
 ### Testing with ngrok for Live Graph Testing
@@ -335,9 +345,14 @@ node --test test/supportEmail*.test.js test/ensureSupportEmailIndexes.test.js
 ### Step-by-Step Procedure
 1. **Verify Handshake:**
    ```bash
-   curl -i "https://staging-api.guidexpert.com/api/support-email/webhooks/graph?validationToken=probe-token"
+   curl -X POST -i "https://staging-api.guidexpert.com/api/support-email/webhooks/graph?validationToken=probe-token"
    ```
-   Confirm response is HTTP 200 with body `probe-token` and response time $< 100\text{ ms}$.
+   Confirm response is HTTP 200 with body `probe-token`, `Content-Type: text/plain`, and response time $< 100\text{ ms}$.
+
+   Also probe the dedicated lifecycle endpoint if configured separately:
+   ```bash
+   curl -X POST -i "https://staging-api.guidexpert.com/api/support-email/webhooks/graph/lifecycle?validationToken=probe-lifecycle-token"
+   ```
 2. **Execute Initial Subscription:**
    Invoke `subscriptionService.createSubscription({ mailbox: 'support-staging@guidexpert.com' })`.
    Confirm subscription document in MongoDB has `status: 'active'` and `expirationDateTime` $\approx +70\text{ hours}$.
@@ -355,8 +370,16 @@ node --test test/supportEmail*.test.js test/ensureSupportEmailIndexes.test.js
 
 ---
 
-## 16. Known Limitations and Production Blockers
+## 16. Verification Stages & Production Blockers
 
+### Distinction Between Verification Stages
+- **Local Implementation Verification:** 100% automated test coverage using in-memory MongoDB and mocked Microsoft Graph HTTP client. Proves logic, timing safety, idempotency, and state machine transitions.
+- **Vercel Configuration Verification:** Express routing, database connection bypass gates, and `vercel.json` 15-minute cron definitions verified in repository source.
+- **Staging Verification (Pending Deployment):** Requires deploying to a publicly accessible HTTPS domain with globally trusted TLS certificates and testing POST handshakes via live cURL.
+- **Live Microsoft Graph Verification (Pending Tenant Onboarding):** Requires live Azure AD tenant credentials, Exchange Online application RBAC role assignment on the target support mailbox, and active subscription establishment.
+- **Production Readiness:** Blocked until staging verification and live tenant onboarding are executed and validated.
+
+### Known Limitations & Production Blockers
 1. **Public HTTPS Requirement:** Microsoft Graph cannot deliver webhooks to `localhost` or HTTP endpoints. Live testing strictly requires a public HTTPS URL (via ngrok in development, or valid domain in staging/production).
 2. **TLS Certificate Requirements:** Microsoft Graph drops connections if the webhook endpoint uses self-signed SSL certificates. Production must use a certificate signed by a globally trusted Certificate Authority.
 3. **Exchange Online Mailbox Scope:** The Azure application must have the custom Exchange Online RBAC role assigned for the exact mailbox address configured in `EmailIngestionPolicy`.

@@ -73,11 +73,11 @@ test('1. valid validationToken returns status 200 with text/plain exact token', 
   assert.ok(res.headers['content-type'].includes('text/plain'));
 });
 
-test('2. validationToken with URI encoded characters is decoded properly', async () => {
-  const rawToken = 'Token with spaces & symbols + = 100%';
-  const encodedToken = encodeURIComponent(rawToken);
+test('2. validationToken is returned exactly without double decoding', async () => {
+  // When Express parses `?validationToken=Token%20with%2520literal`, req.query.validationToken is 'Token with%20literal'
+  const tokenFromExpressQuery = 'Token with%20literal&symbols+=100%';
   const req = {
-    query: { validationToken: encodedToken },
+    query: { validationToken: tokenFromExpressQuery },
     body: {}
   };
   const res = createMockResponse();
@@ -85,7 +85,7 @@ test('2. validationToken with URI encoded characters is decoded properly', async
   await handleGraphWebhook(req, res);
 
   assert.equal(res.statusCode, 200);
-  assert.equal(res.body, rawToken);
+  assert.equal(res.body, tokenFromExpressQuery, 'Must preserve literal percent-encoded sequence without secondary decoding');
   assert.ok(res.headers['content-type'].includes('text/plain'));
 });
 
@@ -597,6 +597,7 @@ test('17. database write failure during event persistence returns 500 error for 
 
   try {
     const req = {
+      method: 'POST',
       query: {},
       body: {
         value: [
@@ -612,14 +613,310 @@ test('17. database write failure during event persistence returns 500 error for 
     };
     const res = createMockResponse();
 
-    await assert.rejects(
-      async () => {
-        await handleGraphWebhook(req, res);
-      },
-      { message: /MongoNetworkError/ },
-      'Must reject if notification cannot be durably persisted'
-    );
+    await handleGraphWebhook(req, res);
+
+    assert.equal(res.statusCode, 500);
+    assert.equal(res.body.success, false);
+    assert.match(res.body.message, /retry/i);
   } finally {
     SupportEmailWebhookEvent.create = originalCreate;
   }
+});
+
+// ==========================================
+// 5. POST Validation & Concurrency Tests
+// ==========================================
+
+test('18. POST method validationToken returns 200 text/plain exactly once decoded', async () => {
+  // In Express, req.query is already parsed from the query string
+  const token = 'PostValidationToken_@!$ 2026';
+  const req = {
+    method: 'POST',
+    path: '/api/support-email/webhooks/graph',
+    query: { validationToken: token },
+    body: {}
+  };
+  const res = createMockResponse();
+
+  await handleGraphWebhook(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body, token);
+  assert.ok(res.headers['content-type'].includes('text/plain'));
+});
+
+test('19. POST validation executes successfully even when database is disconnected', async () => {
+  // Simulate database unavailable by mocking readyState to 0 (disconnected)
+  Object.defineProperty(mongoose.connection, 'readyState', { value: 0, configurable: true });
+
+  try {
+    const req = {
+      method: 'POST',
+      path: '/api/support-email/webhooks/graph',
+      query: { validationToken: 'OfflineDbToken_999' },
+      body: {}
+    };
+    const res = createMockResponse();
+
+    await handleGraphWebhook(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body, 'OfflineDbToken_999');
+    assert.ok(res.headers['content-type'].includes('text/plain'));
+  } finally {
+    delete mongoose.connection.readyState;
+  }
+});
+
+test('20. lifecycle endpoint supports validation handshake via POST and GET', async () => {
+  const reqPost = {
+    method: 'POST',
+    path: '/api/support-email/webhooks/graph/lifecycle',
+    query: { validationToken: 'LifecycleTokenPost_123' },
+    body: {}
+  };
+  const resPost = createMockResponse();
+  await handleGraphWebhook(reqPost, resPost);
+
+  assert.equal(resPost.statusCode, 200);
+  assert.equal(resPost.body, 'LifecycleTokenPost_123');
+
+  const reqGet = {
+    method: 'GET',
+    path: '/api/support-email/webhooks/graph/lifecycle',
+    query: { validationToken: 'LifecycleTokenGet_456' },
+    body: {}
+  };
+  const resGet = createMockResponse();
+  await handleGraphWebhook(reqGet, resGet);
+
+  assert.equal(resGet.statusCode, 200);
+  assert.equal(resGet.body, 'LifecycleTokenGet_456');
+});
+
+test('21. clientState verification works with keyed HMAC when MS_GRAPH_CLIENT_STATE_SECRET is set', async () => {
+  const secretKey = 'test-keyed-hmac-secret-12345';
+  process.env.MS_GRAPH_CLIENT_STATE_SECRET = secretKey;
+  const mailbox = 'support-hmac@guidexpert.com';
+  const rawClientState = 'HmacClientSecretToken_789';
+
+  await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
+  await GraphSubscription.create({
+    subscriptionId: 'sub-hmac-test',
+    mailbox,
+    folder: 'inbox',
+    resource: `users/${mailbox}/messages`,
+    expirationDateTime: new Date(Date.now() + 3600000),
+    clientStateHash: hashClientState(rawClientState, secretKey),
+    status: 'active'
+  });
+
+  try {
+    const req = {
+      method: 'POST',
+      query: {},
+      body: {
+        value: [
+          {
+            subscriptionId: 'sub-hmac-test',
+            clientState: rawClientState,
+            resource: `users/${mailbox}/messages`,
+            changeType: 'created',
+            resourceData: { id: 'msg-hmac-1' }
+          }
+        ]
+      }
+    };
+    const res = createMockResponse();
+    await handleGraphWebhook(req, res);
+
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.success, true);
+  } finally {
+    delete process.env.MS_GRAPH_CLIENT_STATE_SECRET;
+  }
+});
+
+test('22. slow database write does not acknowledge until durable persistence completes', async () => {
+  const mailbox = 'support-slow@guidexpert.com';
+  const clientState = 'SlowDbState';
+
+  await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
+  await GraphSubscription.create({
+    subscriptionId: 'sub-slow-db-test',
+    mailbox,
+    folder: 'inbox',
+    resource: `users/${mailbox}/messages`,
+    expirationDateTime: new Date(Date.now() + 3600000),
+    clientStateHash: hashClientState(clientState),
+    status: 'active'
+  });
+
+  const originalCreate = SupportEmailWebhookEvent.create;
+  let persistenceFinished = false;
+
+  SupportEmailWebhookEvent.create = async (...args) => {
+    // Artificial 50ms I/O latency
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const result = await originalCreate.apply(SupportEmailWebhookEvent, args);
+    persistenceFinished = true;
+    return result;
+  };
+
+  try {
+    const req = {
+      method: 'POST',
+      query: {},
+      body: {
+        value: [
+          {
+            subscriptionId: 'sub-slow-db-test',
+            clientState,
+            resource: `users/${mailbox}/messages`,
+            changeType: 'created',
+            resourceData: { id: 'msg-slow-db-1' }
+          }
+        ]
+      }
+    };
+    const res = createMockResponse();
+    await handleGraphWebhook(req, res);
+
+    assert.equal(res.statusCode, 202);
+    assert.equal(persistenceFinished, true, 'Acknowledgement must happen only after durable write completes');
+  } finally {
+    SupportEmailWebhookEvent.create = originalCreate;
+  }
+});
+
+test('23. concurrent webhook notifications for the same mailbox resolve cleanly', async () => {
+  const mailbox = 'support-concurrent@guidexpert.com';
+  const clientState = 'ConcurrentState';
+
+  await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
+  await GraphSubscription.create({
+    subscriptionId: 'sub-concurrent-test',
+    mailbox,
+    folder: 'inbox',
+    resource: `users/${mailbox}/messages`,
+    expirationDateTime: new Date(Date.now() + 3600000),
+    clientStateHash: hashClientState(clientState),
+    status: 'active'
+  });
+
+  // Launch 5 concurrent notification requests
+  const requests = Array.from({ length: 5 }, (_, i) => ({
+    method: 'POST',
+    query: {},
+    body: {
+      value: [
+        {
+          subscriptionId: 'sub-concurrent-test',
+          clientState,
+          resource: `users/${mailbox}/messages`,
+          changeType: 'created',
+          resourceData: { id: `msg-concurrent-${i}` }
+        }
+      ]
+    }
+  }));
+
+  const responses = await Promise.all(
+    requests.map(async req => {
+      const res = createMockResponse();
+      await handleGraphWebhook(req, res);
+      return res;
+    })
+  );
+
+  // All 5 requests must return 202 Accepted
+  for (const res of responses) {
+    assert.equal(res.statusCode, 202);
+  }
+
+  // 5 events must be durably persisted
+  const count = await SupportEmailWebhookEvent.countDocuments({ subscriptionId: 'sub-concurrent-test' });
+  assert.equal(count, 5);
+
+  // Cursor must be signaled monotonically
+  const cursor = await EmailSyncCursor.findOne({ mailbox });
+  assert.ok(cursor);
+  assert.equal(cursor.hasPendingSync, true);
+  assert.ok(cursor.syncRequestVersion >= 1);
+});
+
+// ==========================================
+// 6. DB Gate Narrowing & Literal Percent-Encoding Tests
+// ==========================================
+
+test('24. POST validationToken with literal percent-encoded sequences returns exact token without double decoding', async () => {
+  // Query token contains literal percent sequences e.g. %20, %25, %2B as parsed by Express query parser
+  const literalToken = 'ValidationToken%20literal%2Bplus%25percent';
+  const req = {
+    method: 'POST',
+    path: '/api/support-email/webhooks/graph',
+    query: { validationToken: literalToken },
+    body: {}
+  };
+  const res = createMockResponse();
+
+  await handleGraphWebhook(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body, literalToken, 'Token must match literal string exactly without secondary decodeURIComponent');
+  assert.ok(res.headers['content-type'].includes('text/plain'));
+});
+
+test('25. POST validation handshake works identically on primary and lifecycle endpoints', async () => {
+  const primaryToken = 'PrimaryEndpointToken_111';
+  const reqPrimary = {
+    method: 'POST',
+    path: '/api/support-email/webhooks/graph',
+    query: { validationToken: primaryToken },
+    body: {}
+  };
+  const resPrimary = createMockResponse();
+  await handleGraphWebhook(reqPrimary, resPrimary);
+  assert.equal(resPrimary.statusCode, 200);
+  assert.equal(resPrimary.body, primaryToken);
+
+  const lifecycleToken = 'LifecycleEndpointToken_222';
+  const reqLifecycle = {
+    method: 'POST',
+    path: '/api/support-email/webhooks/graph/lifecycle',
+    query: { validationToken: lifecycleToken },
+    body: {}
+  };
+  const resLifecycle = createMockResponse();
+  await handleGraphWebhook(reqLifecycle, resLifecycle);
+  assert.equal(resLifecycle.statusCode, 200);
+  assert.equal(resLifecycle.body, lifecycleToken);
+});
+
+test('26. shouldBypassDbGate restricts bypass strictly to exact webhook and lifecycle routes', () => {
+  const app = require('../server');
+  const shouldBypassDbGate = app.shouldBypassDbGate;
+  assert.equal(typeof shouldBypassDbGate, 'function', 'shouldBypassDbGate must be exported for verification');
+
+  // Exact primary route with validationToken -> TRUE
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph', query: { validationToken: 'token' } }), true);
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph/', query: { validationToken: 'token' } }), true);
+
+  // Exact lifecycle route with validationToken -> TRUE
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph/lifecycle', query: { validationToken: 'token' } }), true);
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph/lifecycle/', query: { validationToken: 'token' } }), true);
+
+  // Health route -> TRUE
+  assert.equal(shouldBypassDbGate({ path: '/api/health' }), true);
+
+  // Unrelated paths with validationToken must NOT bypass the database gate -> FALSE
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph/unrelated', query: { validationToken: 'token' } }), false);
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph_attack', query: { validationToken: 'token' } }), false);
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph/lifecycle/extra', query: { validationToken: 'token' } }), false);
+  assert.equal(shouldBypassDbGate({ path: '/api/counsellor-support', query: { validationToken: 'token' } }), false);
+  assert.equal(shouldBypassDbGate({ path: '/api/auth/login', query: { validationToken: 'token' } }), false);
+
+  // Webhook notification payload POST (without validationToken) must NOT bypass database gate -> FALSE
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph', query: {} }), false);
+  assert.equal(shouldBypassDbGate({ path: '/api/support-email/webhooks/graph/lifecycle', query: {} }), false);
 });

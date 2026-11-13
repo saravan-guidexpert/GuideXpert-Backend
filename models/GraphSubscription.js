@@ -35,11 +35,6 @@ const graphSubscriptionSchema = new mongoose.Schema(
       required: true,
       trim: true
     },
-    clientState: {
-      type: String,
-      trim: true,
-      default: null
-    },
     status: {
       type: String,
       enum: SUBSCRIPTION_STATUSES,

@@ -142,10 +142,18 @@ app.use(express.urlencoded({ extended: true }));
 // connectDB caches one attempt and will not open a second client while the first
 // is still connecting or while an existing client can recover.
 
+const GRAPH_WEBHOOK_EXACT_PATHS = new Set([
+  '/api/support-email/webhooks/graph',
+  '/api/support-email/webhooks/graph/',
+  '/api/support-email/webhooks/graph/lifecycle',
+  '/api/support-email/webhooks/graph/lifecycle/'
+]);
+
 function shouldBypassDbGate(req) {
   if (req.path === '/api/health') return true;
-  // Microsoft Graph subscription validation handshake must never be blocked by database connection
-  if (req.path === '/api/support-email/webhooks/graph' && req.query && typeof req.query.validationToken !== 'undefined') {
+  // Microsoft Graph subscription validation handshake must never be blocked by database connection.
+  // Restricted strictly to the exact primary and lifecycle webhook endpoints.
+  if (GRAPH_WEBHOOK_EXACT_PATHS.has(req.path) && req.query && typeof req.query.validationToken !== 'undefined') {
     return true;
   }
   if (req.method !== 'GET') return false;
@@ -368,4 +376,5 @@ if (require.main === module) {
   startServer();
 }
 
+app.shouldBypassDbGate = shouldBypassDbGate;
 module.exports = app;

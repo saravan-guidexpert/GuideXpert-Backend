@@ -13,10 +13,14 @@ const DEFAULT_EXPIRATION_MINUTES = 4200;
 const MIN_EXPIRATION_MARGIN_HOURS = 24;
 
 /**
- * Computes SHA-256 hash of clientState for secure storage and lookup.
+ * Computes SHA-256 hash or keyed HMAC of clientState for secure verification at rest.
+ * Uses MS_GRAPH_CLIENT_STATE_SECRET when configured; otherwise falls back to standard SHA-256.
  */
-function hashClientState(clientState) {
+function hashClientState(clientState, secret = process.env.MS_GRAPH_CLIENT_STATE_SECRET) {
   if (!clientState || typeof clientState !== 'string') return '';
+  if (secret) {
+    return crypto.createHmac('sha256', secret).update(clientState).digest('hex');
+  }
   return crypto.createHash('sha256').update(clientState).digest('hex');
 }
 
@@ -173,7 +177,6 @@ class SubscriptionService {
           resource,
           expirationDateTime: actualExpiration,
           clientStateHash,
-          clientState: effectiveClientState,
           status: 'active',
           notificationUrl: targetUrl,
           lifecycleUrl: targetLifecycleUrl,

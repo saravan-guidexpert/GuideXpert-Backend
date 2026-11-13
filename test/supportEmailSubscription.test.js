@@ -85,7 +85,6 @@ async function seedSubscription(overrides = {}) {
     resource: overrides.resource || formatGraphResource(mailbox, folder),
     expirationDateTime: overrides.expirationDateTime || new Date(Date.now() + 48 * 3600 * 1000),
     clientStateHash: overrides.clientStateHash || hashClientState(overrides.clientState || 'test-secret'),
-    clientState: overrides.clientState || 'test-secret',
     status: overrides.status || 'active',
     notificationUrl: overrides.notificationUrl || 'https://api.guidexpert.com/api/support-email/webhooks/graph',
     ...overrides
@@ -530,4 +529,73 @@ test('17. generateClientState generates secure random 64-hex-char string', () =>
   assert.strictEqual(secret2.length, 64);
   assert.notStrictEqual(secret1, secret2);
   assert.match(secret1, /^[0-9a-f]{64}$/);
+});
+
+test('18. createSubscription with separate notificationUrl and lifecycleUrl configures both', async () => {
+  const mockGraph = new MockGraphClient();
+  const service = new SubscriptionService({
+    graphClient: mockGraph,
+    notificationUrl: 'https://api.guidexpert.com/api/support-email/webhooks/graph',
+    lifecycleUrl: 'https://api.guidexpert.com/api/support-email/webhooks/graph/lifecycle'
+  });
+
+  const mailbox = 'support-split@guidexpert.com';
+  const result = await service.createSubscription({
+    mailbox,
+    folder: 'inbox',
+    notificationUrl: 'https://api.guidexpert.com/api/support-email/webhooks/graph',
+    lifecycleUrl: 'https://api.guidexpert.com/api/support-email/webhooks/graph/lifecycle'
+  });
+
+  assert.strictEqual(result.created, true);
+  assert.strictEqual(mockGraph.requests.length, 1);
+  const req = mockGraph.requests[0];
+  assert.strictEqual(req.data.notificationUrl, 'https://api.guidexpert.com/api/support-email/webhooks/graph');
+  assert.strictEqual(req.data.lifecycleNotificationUrl, 'https://api.guidexpert.com/api/support-email/webhooks/graph/lifecycle');
+
+  // Verify DB record contains lifecycleUrl but NO plaintext clientState
+  const doc = await GraphSubscription.findOne({ subscriptionId: result.subscription.subscriptionId }).lean();
+  assert.strictEqual(doc.notificationUrl, 'https://api.guidexpert.com/api/support-email/webhooks/graph');
+  assert.strictEqual(doc.lifecycleUrl, 'https://api.guidexpert.com/api/support-email/webhooks/graph/lifecycle');
+  assert.strictEqual(doc.clientState, undefined, 'Must not store clientState plaintext in MongoDB');
+  assert.ok(doc.clientStateHash, 'Must store cryptographic hash');
+});
+
+test('19. createSubscription with identical notification and lifecycle URLs defaults correctly', async () => {
+  const mockGraph = new MockGraphClient();
+  const service = new SubscriptionService({
+    graphClient: mockGraph,
+    notificationUrl: 'https://api.guidexpert.com/api/support-email/webhooks/graph'
+  });
+
+  const mailbox = 'support-identical@guidexpert.com';
+  const result = await service.createSubscription({
+    mailbox,
+    folder: 'inbox'
+  });
+
+  assert.strictEqual(result.created, true);
+  const req = mockGraph.requests[0];
+  assert.strictEqual(req.data.notificationUrl, 'https://api.guidexpert.com/api/support-email/webhooks/graph');
+  assert.strictEqual(req.data.lifecycleNotificationUrl, 'https://api.guidexpert.com/api/support-email/webhooks/graph');
+});
+
+test('20. clientState is never stored in plaintext across create, renew, or health repair', async () => {
+  const mockGraph = new MockGraphClient();
+  const service = new SubscriptionService({
+    graphClient: mockGraph,
+    notificationUrl: 'https://api.guidexpert.com/api/support-email/webhooks/graph'
+  });
+
+  const mailbox = 'support-no-plaintext@guidexpert.com';
+  const result = await service.createSubscription({ mailbox, clientState: 'SecretPlaintext123!' });
+
+  const doc = await GraphSubscription.findOne({ subscriptionId: result.subscription.subscriptionId }).lean();
+  assert.strictEqual(doc.clientState, undefined);
+  assert.strictEqual(doc.clientStateHash, hashClientState('SecretPlaintext123!'));
+
+  // Health sync
+  await service.syncSubscriptionHealth({ mailbox });
+  const docAfter = await GraphSubscription.findOne({ subscriptionId: result.subscription.subscriptionId }).lean();
+  assert.strictEqual(docAfter.clientState, undefined);
 });
