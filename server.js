@@ -77,6 +77,8 @@ const { requireCrmSession } = require('./middleware/requireCrmSession');
 const crmPortalGate = require('./middleware/crmPortalGate');
 const { CRM_SECTION_KEY } = require('./constants/crm');
 const { CRM_ACCESS_SECTION } = require('./constants/crmUsers');
+const { ANSWER_STUDIO_SECTION_KEY } = require('./services/answerStudio/constants');
+const answerStudioRoutes = require('./routes/answerStudioRoutes');
 const {
   getWhatsAppConfigStatus,
   logWhatsAppConfigWarnings,
@@ -228,6 +230,12 @@ app.use(
   requireAdminSection(CRM_SECTION_KEY, 'Consultancy CRM access is required.'),
   crmRoutes
 );
+app.use(
+  '/api/admin/answer-studio',
+  requireAdmin,
+  requireAdminSection(ANSWER_STUDIO_SECTION_KEY, 'Answer Studio access is required.'),
+  answerStudioRoutes
+);
 app.use('/api/admin', adminRoutes);
 app.use('/api/resources', require('./routes/resourceRoutes'));
 app.get('/api/student-workspace-updates', require('./controllers/studentWorkspaceUpdateController').publicList);
@@ -282,7 +290,7 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
   try {
     await connectDB();
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`MongoDB connection established. Server ready to accept requests.`);
 
@@ -336,6 +344,10 @@ const startServer = async () => {
           );
         }, tickMs);
       }
+    });
+    server.on('error', (error) => {
+      console.error(`Failed to listen on port ${PORT}:`, error.message);
+      process.exit(1);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
