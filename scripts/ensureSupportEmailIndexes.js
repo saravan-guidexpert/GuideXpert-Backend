@@ -105,6 +105,7 @@ const INDEX_PLAN = [
     indexes: [
       { key: { dedupeKey: 1 }, options: { unique: true, name: 'dedupeKey_1_unique' } },
       { key: { receivedAt: -1 }, options: { name: 'receivedAt_-1' } },
+      { key: { status: 1, receivedAt: 1 }, options: { name: 'status_1_receivedAt_1' } },
       { key: { expiresAt: 1 }, options: { expireAfterSeconds: 0, name: 'expiresAt_1_ttl' } }
     ]
   },
@@ -122,7 +123,8 @@ const INDEX_PLAN = [
     collectionName: 'graphsubscriptions',
     indexes: [
       { key: { subscriptionId: 1 }, options: { unique: true, name: 'subscriptionId_1_unique' } },
-      { key: { expirationDateTime: 1 }, options: { name: 'expirationDateTime_1' } }
+      { key: { expirationDateTime: 1 }, options: { name: 'expirationDateTime_1' } },
+      { key: { mailbox: 1, status: 1 }, options: { name: 'mailbox_1_status_1' } }
     ]
   },
   {

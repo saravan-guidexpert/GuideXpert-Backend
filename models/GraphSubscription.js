@@ -10,6 +10,17 @@ const graphSubscriptionSchema = new mongoose.Schema(
       required: true,
       trim: true
     },
+    mailbox: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: null
+    },
+    folder: {
+      type: String,
+      trim: true,
+      default: 'inbox'
+    },
     resource: {
       type: String,
       required: true,
@@ -23,6 +34,11 @@ const graphSubscriptionSchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true
+    },
+    clientState: {
+      type: String,
+      trim: true,
+      default: null
     },
     status: {
       type: String,

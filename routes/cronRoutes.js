@@ -417,6 +417,21 @@ router.get('/analytics/daily-report', verifyCronSecret, async (req, res) => {
   }
 });
 
+const { runAllReconciliations } = require('../services/supportEmail/reconciliationService');
+
+router.all('/support-email-reconcile', verifyCronSecret, async (req, res) => {
+  try {
+    const outcome = await runAllReconciliations({ batchBudgetMs: 45000 });
+    return res.status(200).json({
+      success: true,
+      message: 'Support email reconciliation completed',
+      outcome
+    });
+  } catch (error) {
+    return failCron(res, error, '[Cron] support-email-reconcile:');
+  }
+});
+
 router.get('/health', (req, res) => {
   res.status(200).json({
     success: true,

@@ -35,19 +35,47 @@ const supportEmailWebhookEventSchema = new mongoose.Schema(
       trim: true,
       default: null
     },
+    resourceDataId: {
+      type: String,
+      trim: true,
+      default: null
+    },
+    lifecycleEventType: {
+      type: String,
+      trim: true,
+      default: null
+    },
     receivedAt: {
       type: Date,
       default: Date.now
+    },
+    processedAt: {
+      type: Date,
+      default: null
     },
     status: {
       type: String,
       enum: WEBHOOK_STATUSES,
       default: 'received'
     },
+    retryCount: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    errorCategory: {
+      type: String,
+      trim: true,
+      default: null
+    },
     error: {
       type: String,
       trim: true,
       default: null
+    },
+    metadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({})
     },
     // TTL expiration to prune dedupe rows after 7 days, avoiding permanent suppression
     expiresAt: {

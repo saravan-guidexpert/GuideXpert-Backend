@@ -61,6 +61,7 @@ const posterTemplatePublicRoutes = require('./routes/posterTemplatePublicRoutes'
 const osviRoutes = require('./routes/osviRoutes');
 const counsellorSupportRoutes = require('./routes/counsellorSupportRoutes');
 const gupshupWebhookRoutes = require('./routes/gupshupWebhookRoutes');
+const supportEmailWebhookRoutes = require('./routes/supportEmailWebhookRoutes');
 const whatsappChatAdminRoutes = require('./routes/whatsappChatAdminRoutes');
 const aiCallsAdminRoutes = require('./routes/aiCallsAdminRoutes');
 const whatsappChatBdaRoutes = require('./routes/whatsappChatBdaRoutes');
@@ -143,6 +144,10 @@ app.use(express.urlencoded({ extended: true }));
 
 function shouldBypassDbGate(req) {
   if (req.path === '/api/health') return true;
+  // Microsoft Graph subscription validation handshake must never be blocked by database connection
+  if (req.path === '/api/support-email/webhooks/graph' && req.query && typeof req.query.validationToken !== 'undefined') {
+    return true;
+  }
   if (req.method !== 'GET') return false;
   return /^\/(?:api\/)?blogs(?:\/[^/]+)?\/?$/.test(req.path);
 }
@@ -270,6 +275,8 @@ app.use('/api/osvi', osviRoutes);
 app.use('/api/counsellor-support', counsellorSupportRoutes);
 // Gupshup app callback URL (production): POST https://<API_HOST>/webhook/gupshup — configure in Gupshup console; no admin auth.
 app.use('/webhook/gupshup', gupshupWebhookRoutes);
+// Microsoft Graph Support Email Notification Webhook (validation & notification callbacks)
+app.use('/api/support-email/webhooks/graph', supportEmailWebhookRoutes);
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Not found' });
 });
