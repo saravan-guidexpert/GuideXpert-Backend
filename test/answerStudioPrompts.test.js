@@ -67,6 +67,9 @@ function promptBody(overrides = {}) {
 
 describe('Answer Studio prompt management', { timeout: 120000, concurrency: 1 }, () => {
   before(async () => {
+    process.env.LLM_API_KEY = process.env.LLM_API_KEY || 'studio-test-key';
+    process.env.LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://studio.invalid/v1';
+    process.env.LLM_MODEL = process.env.LLM_MODEL || 'studio-test-model';
     mongo = await MongoMemoryServer.create();
     await mongoose.connect(mongo.getUri(), { dbName: 'answer_studio_prompts' });
     const app = express();
