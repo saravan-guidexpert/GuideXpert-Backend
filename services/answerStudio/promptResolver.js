@@ -1,6 +1,7 @@
 'use strict';
 
 const AnswerStudioPrompt = require('../../models/AnswerStudioPrompt');
+const AnswerStudioPromptState = require('../../models/AnswerStudioPromptState');
 const defaultPrompts = require('./defaultPrompts');
 const { GenerationError } = require('./generationValidation');
 
@@ -9,13 +10,35 @@ const { GenerationError } = require('./generationValidation');
  * The client cannot supply this text.
  */
 async function resolveStudioPrompt(platform) {
-  const active = await AnswerStudioPrompt.findOne({ platform, active: true }).lean();
-  if (active && typeof active.body === 'string' && active.body.trim()) {
+  const states = await AnswerStudioPromptState.find({ platform }).lean();
+  if (states.length > 1) {
+    throw new GenerationError(
+      'Answer Studio prompt state is ambiguous for this platform.',
+      503,
+      'PROMPT_STATE_CONFLICT'
+    );
+  }
+  const pointer = states[0] && states[0].activePromptId;
+  if (pointer) {
+    const selected = await AnswerStudioPrompt.findById(pointer).lean();
+    if (
+      !selected ||
+      selected.platform !== platform ||
+      (selected.lifecycle !== 'active' && selected.lifecycle !== 'draft') ||
+      typeof selected.body !== 'string' ||
+      !selected.body.trim()
+    ) {
+      throw new GenerationError(
+        'The active Answer Studio prompt is unavailable.',
+        503,
+        'PROMPT_STATE_INVALID'
+      );
+    }
     return {
       source: 'database',
-      key: active.key,
-      version: active.version,
-      body: active.body,
+      key: selected.key,
+      version: selected.version,
+      body: selected.body,
     };
   }
 

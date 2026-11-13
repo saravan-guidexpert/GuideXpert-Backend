@@ -139,7 +139,10 @@ describe('Answer Studio authorization', { timeout: 120000, concurrency: 1 }, () 
       ['POST', '/api/admin/answer-studio/examples'],
       ['POST', '/api/admin/answer-studio/examples/507f1f77bcf86cd799439011/approve'],
       ['PUT', '/api/admin/answer-studio/prompts'],
-      ['PUT', '/api/admin/answer-studio/prompts/quora'],
+      ['POST', '/api/admin/answer-studio/prompts'],
+      ['POST', '/api/admin/answer-studio/prompts/507f1f77bcf86cd799439011/versions'],
+      ['POST', '/api/admin/answer-studio/prompts/507f1f77bcf86cd799439011/activate'],
+      ['POST', '/api/admin/answer-studio/prompts/507f1f77bcf86cd799439011/deactivate'],
     ];
     for (const [method, urlPath] of paths) {
       const result = await request(method, urlPath, sectionToken);
@@ -148,20 +151,21 @@ describe('Answer Studio authorization', { timeout: 120000, concurrency: 1 }, () 
     }
   });
 
-  test('super admin passes the prompt gate and receives no stored data', async () => {
-    const paths = [
-      ['PUT', '/api/admin/answer-studio/prompts', 'prompts'],
-      ['GET', '/api/admin/answer-studio/prompts/quora', 'prompts'],
-    ];
-    for (const [method, urlPath, scope] of paths) {
-      const result = await request(method, urlPath, superToken);
-      assert.equal(result.status, 501, `${method} ${urlPath}`);
-      assert.equal(result.data.success, false);
-      assert.equal(result.data.implemented, false);
-      assert.equal(result.data.scope, scope);
-      assert.equal(result.data.knowledge, undefined);
-      assert.equal(result.data.examples, undefined);
-      assert.equal(result.data.prompts, undefined);
-    }
+  test('super admin can list prompts and unimplemented prompt methods stay closed', async () => {
+    const list = await request('GET', '/api/admin/answer-studio/prompts', superToken);
+    assert.equal(list.status, 200);
+    assert.equal(list.data.success, true);
+    assert.deepEqual(list.data.data, []);
+    assert.equal(list.data.prompts, undefined);
+
+    const unknownId = await request('GET', '/api/admin/answer-studio/prompts/quora', superToken);
+    assert.equal(unknownId.status, 400);
+    assert.equal(unknownId.data.code, 'INVALID_PROMPT_ID');
+    assert.equal(unknownId.data.body, undefined);
+
+    const unimplemented = await request('PUT', '/api/admin/answer-studio/prompts', superToken);
+    assert.equal(unimplemented.status, 501);
+    assert.equal(unimplemented.data.implemented, false);
+    assert.equal(unimplemented.data.scope, 'prompts');
   });
 });

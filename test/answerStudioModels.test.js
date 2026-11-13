@@ -14,6 +14,7 @@ const AnswerStudioKnowledge = require('../models/AnswerStudioKnowledge');
 const AnswerStudioExample = require('../models/AnswerStudioExample');
 const AnswerStudioGeneration = require('../models/AnswerStudioGeneration');
 const AnswerStudioPrompt = require('../models/AnswerStudioPrompt');
+const AnswerStudioPromptState = require('../models/AnswerStudioPromptState');
 const Admin = require('../models/Admin');
 
 function vector(length, value = 0.1) {
@@ -277,8 +278,14 @@ describe('Answer Studio models', { timeout: 120000, concurrency: 1 }, () => {
       platform: 'reddit',
       body: 'Current instructions.',
       version: 1,
+      lifecycle: 'active',
       active: true,
       createdBy: admin._id,
+    });
+    await AnswerStudioPromptState.create({
+      platform: 'reddit',
+      activePromptId: current._id,
+      revision: 1,
     });
     const next = await AnswerStudioPrompt.create({
       key: 'answerStudio.reddit',
@@ -294,9 +301,13 @@ describe('Answer Studio models', { timeout: 120000, concurrency: 1 }, () => {
     const storedCurrent = await AnswerStudioPrompt.findById(current._id).lean();
     const storedNext = await AnswerStudioPrompt.findById(next._id).lean();
     assert.equal(storedCurrent.active, false);
+    assert.equal(storedCurrent.lifecycle, 'inactive');
     assert.equal(storedNext.active, true);
+    assert.equal(storedNext.lifecycle, 'active');
     assert.equal(storedCurrent.body, 'Current instructions.');
     assert.equal(String(storedNext.updatedBy), String(admin._id));
+    const state = await AnswerStudioPromptState.findOne({ platform: 'reddit' }).lean();
+    assert.equal(String(state.activePromptId), String(next._id));
 
     await assert.rejects(
       () =>

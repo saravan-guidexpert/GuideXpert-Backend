@@ -9,6 +9,7 @@ const {
 const knowledgeController = require('../controllers/answerStudioKnowledgeController');
 const exampleController = require('../controllers/answerStudioExampleController');
 const generationController = require('../controllers/answerStudioGenerationController');
+const promptController = require('../controllers/answerStudioPromptController');
 
 const router = express.Router();
 
@@ -37,6 +38,12 @@ router.post('/examples/:id/revoke-approval', requireSuperAdmin, exampleControlle
 router.post('/examples/:id/archive', requireSuperAdmin, exampleController.archive);
 router.post('/examples/:id/reactivate', requireSuperAdmin, exampleController.reactivate);
 
+router.get('/prompts', requireSuperAdmin, promptController.list);
+router.post('/prompts', requireSuperAdmin, promptController.create);
+router.post('/prompts/:id/versions', requireSuperAdmin, promptController.createVersion);
+router.post('/prompts/:id/activate', requireSuperAdmin, promptController.activate);
+router.post('/prompts/:id/deactivate', requireSuperAdmin, promptController.deactivate);
+router.get('/prompts/:id', requireSuperAdmin, promptController.getOne);
 router.use('/prompts', superAdminManagement('prompts'));
 
 module.exports = router;

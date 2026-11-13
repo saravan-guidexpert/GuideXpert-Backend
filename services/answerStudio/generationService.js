@@ -15,6 +15,14 @@ const GENERATION_TEMPERATURE = 0.2;
 const GENERATION_MAX_TOKENS = 400;
 const GENERATION_TIMEOUT_MS = 20000;
 
+// OpenAiCompatibleProvider reads these at call time. When any are missing the
+// provider throws a plain Error, which used to surface as a misleading 502.
+const PROVIDER_ENV_KEYS = Object.freeze(['LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL']);
+
+function missingProviderEnv() {
+  return PROVIDER_ENV_KEYS.filter((key) => !String(process.env[key] || '').trim());
+}
+
 function adminId(admin) {
   const id = admin && (admin._id || admin.id);
   if (!id) {
@@ -68,6 +76,18 @@ function toPublicGeneration(doc, answer) {
 async function generateAnswer(body, admin) {
   const input = parseGenerateInput(body || {});
   const actorId = adminId(admin);
+  const missingEnv = missingProviderEnv();
+  if (missingEnv.length) {
+    console.error(
+      '[answer-studio] generation is not configured; missing env:',
+      missingEnv.join(', ')
+    );
+    throw new GenerationError(
+      'Answer Studio is not configured yet. Set LLM_API_KEY, LLM_BASE_URL, and LLM_MODEL.',
+      503,
+      'PROVIDER_NOT_CONFIGURED'
+    );
+  }
   const prompt = await resolveStudioPrompt(input.platform);
 
   let result;

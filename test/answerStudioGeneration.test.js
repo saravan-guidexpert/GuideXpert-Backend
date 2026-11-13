@@ -22,6 +22,7 @@ const vectorSearch = require('../services/chatbot/knowledgeVectorSearchService')
 const knowledgeSearch = require('../services/chatbot/knowledgeSearchService');
 const Admin = require('../models/Admin');
 const AnswerStudioPrompt = require('../models/AnswerStudioPrompt');
+const AnswerStudioPromptState = require('../models/AnswerStudioPromptState');
 const AnswerStudioGeneration = require('../models/AnswerStudioGeneration');
 
 let mongo;
@@ -98,6 +99,10 @@ describe('Answer Studio prompt generation', { timeout: 120000, concurrency: 1 },
     server = app.listen(0);
     baseUrl = `http://127.0.0.1:${server.address().port}`;
 
+    process.env.LLM_API_KEY = process.env.LLM_API_KEY || 'studio-test-key';
+    process.env.LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://studio.invalid/v1';
+    process.env.LLM_MODEL = process.env.LLM_MODEL || 'studio-test-model';
+
     superAdmin = await Admin.create({
       username: 'generation-super',
       password: 'secret12',
@@ -165,6 +170,7 @@ describe('Answer Studio prompt generation', { timeout: 120000, concurrency: 1 },
     AnswerStudioGeneration.create = originals.create;
     await AnswerStudioGeneration.deleteMany({});
     await AnswerStudioPrompt.deleteMany({});
+    await AnswerStudioPromptState.deleteMany({});
     defaultPrompts.byPlatform.quora = {
       key: 'quora-default-v1',
       version: 1,
@@ -225,12 +231,18 @@ describe('Answer Studio prompt generation', { timeout: 120000, concurrency: 1 },
   });
 
   test('an active database prompt replaces the default prompt', async () => {
-    await AnswerStudioPrompt.create({
+    const selected = await AnswerStudioPrompt.create({
       key: 'quora-office',
       platform: 'quora',
       body: 'DATABASE QUORA PROMPT BODY',
       version: 2,
+      lifecycle: 'active',
       active: true,
+    });
+    await AnswerStudioPromptState.create({
+      platform: 'quora',
+      activePromptId: selected._id,
+      revision: 1,
     });
     stubCompletion('Answer from the office prompt.', {
       usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
@@ -284,6 +296,29 @@ describe('Answer Studio prompt generation', { timeout: 120000, concurrency: 1 },
     assert.match(override.data.message, /cannot be set/);
     assert.equal(llmCalls.length, 0);
     assert.equal(await AnswerStudioGeneration.countDocuments(), 0);
+  });
+
+  test('reports missing provider configuration as 503 instead of a provider outage', async () => {
+    const saved = {};
+    for (const key of ['LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL']) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+    try {
+      stubCompletion('should not be called');
+      const unconfigured = await request('/api/admin/answer-studio/generate', { body: questionBody() });
+      assert.equal(unconfigured.status, 503);
+      assert.equal(unconfigured.data.code, 'PROVIDER_NOT_CONFIGURED');
+      assert.equal(unconfigured.data.success, false);
+      assert.equal(llmCalls.length, 0);
+      assert.equal(await AnswerStudioGeneration.countDocuments(), 0);
+      assert.equal(JSON.stringify(unconfigured.data).includes('studio-test-key'), false);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   test('does not report success when the model response is empty, times out, fails, or cannot be saved', async () => {

@@ -290,7 +290,7 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
   try {
     await connectDB();
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
       console.log(`MongoDB connection established. Server ready to accept requests.`);
 
@@ -344,6 +344,10 @@ const startServer = async () => {
           );
         }, tickMs);
       }
+    });
+    server.on('error', (error) => {
+      console.error(`Failed to listen on port ${PORT}:`, error.message);
+      process.exit(1);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
