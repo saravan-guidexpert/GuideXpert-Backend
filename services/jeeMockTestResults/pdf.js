@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { jsPDF } = require('jspdf');
 const {
   formatScorePair,
@@ -8,21 +10,27 @@ const {
   formatInvitedOn,
 } = require('./format');
 
+// Same wordmark as the admin sidebar:
+// https://res.cloudinary.com/dfqdb1xws/image/upload/v1773394005/GuideXpert_Logo_inbaz5.png
+const LOGO = fs.readFileSync(path.join(__dirname, 'guidexpert-logo.png'));
+const LOGO_ASPECT = 995 / 232;
+
 function buildResultPdf(result) {
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
+  const headerHeight = 78;
   doc.setFillColor(4, 30, 48);
-  doc.rect(0, 0, pageWidth, 72, 'F');
+  doc.rect(0, 0, pageWidth, headerHeight, 'F');
+  const logoHeight = 26;
+  const logoWidth = logoHeight * LOGO_ASPECT;
+  doc.addImage(LOGO, 'PNG', 48, 12, logoWidth, logoHeight, 'guidexpert-logo', 'SLOW');
   doc.setTextColor(255, 255, 255);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.text('GuideXpert', 48, 32);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(11);
-  doc.text('JEE Main Mock Test Result', 48, 52);
+  doc.text('JEE Main Mock Test Result', 48, 58);
 
   doc.setTextColor(4, 30, 48);
-  let y = 112;
+  let y = headerHeight + 40;
   const rows = [
     ['Student', result.studentName || 'Not available'],
     ['Invited on', formatInvitedOn(result.invitedOn)],
