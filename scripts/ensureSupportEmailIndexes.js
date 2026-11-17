@@ -5,6 +5,7 @@ require('dotenv').config();
 
 const mongoose = require('mongoose');
 const { isLocalUri, describeUri } = require('../config/mongooseSafety');
+const { sanitizeText } = require('../services/supportEmail/observability');
 
 // Import all support email models
 const SupportEmail = require('../models/SupportEmail');
@@ -17,6 +18,7 @@ const SupportEmailAuditLog = require('../models/SupportEmailAuditLog');
 const SupportEmailWebhookEvent = require('../models/SupportEmailWebhookEvent');
 const EmailSyncCursor = require('../models/EmailSyncCursor');
 const GraphSubscription = require('../models/GraphSubscription');
+const GraphSubscriptionOperation = require('../models/GraphSubscriptionOperation');
 const GoogleSheetsSyncJob = require('../models/GoogleSheetsSyncJob');
 const SupportEmailRun = require('../models/SupportEmailRun');
 const EmailIngestionPolicy = require('../models/EmailIngestionPolicy');
@@ -124,7 +126,31 @@ const INDEX_PLAN = [
     indexes: [
       { key: { subscriptionId: 1 }, options: { unique: true, name: 'subscriptionId_1_unique' } },
       { key: { expirationDateTime: 1 }, options: { name: 'expirationDateTime_1' } },
-      { key: { mailbox: 1, status: 1 }, options: { name: 'mailbox_1_status_1' } }
+      { key: { mailbox: 1, status: 1 }, options: { name: 'mailbox_1_status_1' } },
+      {
+        key: { mailbox: 1, folder: 1, status: 1, expirationDateTime: -1 },
+        options: { name: 'mailbox_1_folder_1_status_1_expirationDateTime_-1' }
+      }
+    ]
+  },
+  {
+    model: GraphSubscriptionOperation,
+    collectionName: 'graphsubscriptionoperations',
+    indexes: [
+      { key: { operationId: 1 }, options: { unique: true, name: 'operationId_1_unique' } },
+      { key: { mailbox: 1, folder: 1, state: 1 }, options: { name: 'mailbox_1_folder_1_state_1' } },
+      { key: { mailbox: 1, folder: 1, leaseExpiresAt: 1 }, options: { name: 'mailbox_1_folder_1_leaseExpiresAt_1' } },
+      { key: { subscriptionId: 1 }, options: { sparse: true, name: 'subscriptionId_1_sparse' } },
+      { key: { leaseExpiresAt: 1 }, options: { name: 'leaseExpiresAt_1' } },
+      { key: { mailbox: 1, folder: 1, recoveryState: 1 }, options: { name: 'mailbox_1_folder_1_recoveryState_1' } },
+      {
+        key: { reservationKey: 1 },
+        options: {
+          unique: true,
+          partialFilterExpression: { reservationKey: { $type: 'string' } },
+          name: 'reservationKey_1_unique_partial'
+        }
+      }
     ]
   },
   {
@@ -304,8 +330,8 @@ async function ensureSupportEmailIndexes(options = {}) {
           collectionDetail.actions.push({ name: idxName, status: 'CREATED', key: idxDef.key });
           if (!options.silent) console.log(`  [CREATED] ${collectionName}.${idxName}`);
         } catch (err) {
-          collectionDetail.actions.push({ name: idxName, status: 'FAILED', error: err.message });
-          if (!options.silent) console.error(`  [FAILED] ${collectionName}.${idxName}: ${err.message}`);
+          collectionDetail.actions.push({ name: idxName, status: 'FAILED', error: sanitizeText(err.message) });
+          if (!options.silent) console.error(`  [FAILED] ${collectionName}.${idxName}: ${sanitizeText(err.message)}`);
         }
       } else {
         collectionDetail.actions.push({ name: idxName, status: 'PLANNED', key: idxDef.key, options: idxDef.options });
@@ -343,7 +369,7 @@ if (require.main === module) {
       await mongoose.disconnect();
       process.exit(0);
     } catch (err) {
-      console.error('[Index Migration Error]', err.message);
+      console.error('[Index Migration Error]', sanitizeText(err.message));
       if (mongoose.connection.readyState !== 0) {
         await mongoose.disconnect();
       }

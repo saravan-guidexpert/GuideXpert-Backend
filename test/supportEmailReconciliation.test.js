@@ -52,14 +52,20 @@ class MockGraphClient {
 }
 
 test.before(async () => {
+  process.env.MS_GRAPH_CLIENT_STATE_SECRET = 'test-suite-default-hmac-secret-key-32b';
+  process.env.MS_GRAPH_CLIENT_STATE_KEY_ID = 'primary';
   await setupTestDb();
 });
 
 test.beforeEach(async () => {
   await clearTestDb();
+  process.env.MS_GRAPH_CLIENT_STATE_SECRET = 'test-suite-default-hmac-secret-key-32b';
+  process.env.MS_GRAPH_CLIENT_STATE_KEY_ID = 'primary';
 });
 
 test.after(async () => {
+  delete process.env.MS_GRAPH_CLIENT_STATE_SECRET;
+  delete process.env.MS_GRAPH_CLIENT_STATE_KEY_ID;
   await teardownTestDb();
 });
 
@@ -457,4 +463,72 @@ test('12. cron route accepts authorized request with valid CRON_SECRET and retur
   assert.strictEqual(res.body.success, true);
   assert.ok(res.body.outcome);
   assert.strictEqual(res.body.outcome.totalPolicies, 1);
+});
+
+
+test('13. reconcileMailbox invokes remote orphan reconciliation during scheduled pass and cleans remote orphans', async () => {
+  const mailbox = 'orphan-recon@guidexpert.com';
+  const folder = 'inbox';
+  await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
+
+  // Seed local active subscription
+  await GraphSubscription.create({
+    subscriptionId: 'sub-local-valid',
+    mailbox, folder,
+    resource: `users/${encodeURIComponent(mailbox)}/mailFolders('${folder}')/messages`,
+    expirationDateTime: new Date(Date.now() + 48 * 3600 * 1000),
+    clientStateHash: 'somehash',
+    status: 'active'
+  });
+
+  const notificationUrl = 'https://api.guidexpert.com/api/support-email/webhooks/graph';
+  const resource = `users/${encodeURIComponent(mailbox)}/mailFolders('${folder}')/messages`;
+  const deleteRequests = [];
+  const mockGraph = {
+    requests: [],
+    async get(url, options = {}) {
+      return this.request({ ...options, url, method: 'GET' });
+    },
+    async post(url, data, options = {}) {
+      return this.request({ ...options, url, method: 'POST', data });
+    },
+    async request({ url, method = 'GET', data }) {
+      this.requests.push({ url, method, data });
+      if (method === 'GET' && url === '/subscriptions') {
+        // Return valid sub AND an orphaned sub from a previous crash (created 200m ago)
+        return {
+          value: [
+            { id: 'sub-local-valid', resource, notificationUrl, expirationDateTime: new Date(Date.now() + 48 * 3600 * 1000).toISOString() },
+            { id: 'sub-orphan-remote-13', resource, notificationUrl, expirationDateTime: new Date(Date.now() + 4000 * 60 * 1000).toISOString() }
+          ]
+        };
+      }
+      if (method === 'DELETE' && url === '/subscriptions/sub-orphan-remote-13') {
+        deleteRequests.push(url);
+        return {};
+      }
+      return {
+        value: [],
+        '@odata.deltaLink': 'https://graph.microsoft.com/delta-link-token'
+      };
+    }
+  };
+
+  const subSvc = new SubscriptionService({
+    graphClient: mockGraph,
+    notificationUrl
+  });
+
+  const result = await reconcileMailbox({
+    mailbox,
+    graphClient: mockGraph,
+    subscriptionSvc: subSvc
+  });
+
+  // Verify orphanReconciliation was invoked and executed
+  assert.ok(result.subscription, 'Subscription outcome present');
+  assert.ok(result.subscription.orphanReconciliation, 'orphanReconciliation must be invoked in scheduled pass');
+  assert.strictEqual(result.subscription.orphanReconciliation.remoteOrphansCount, 1);
+  assert.strictEqual(result.subscription.orphanReconciliation.deletedRemoteCount, 1);
+  assert.strictEqual(deleteRequests.length, 1, 'Proven remote orphan must be deleted during scheduled pass');
 });

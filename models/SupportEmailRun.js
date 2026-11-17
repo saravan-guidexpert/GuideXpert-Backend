@@ -33,6 +33,18 @@ const supportEmailRunSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: null
+    },
+    activeLock: {
+      type: Boolean,
+      default: false
+    },
+    lockExpiresAt: {
+      type: Date,
+      default: null
+    },
+    lockToken: {
+      type: String,
+      default: null
     }
   },
   {
@@ -43,5 +55,13 @@ const supportEmailRunSchema = new mongoose.Schema(
 // Indexes declared according to Appendix A
 supportEmailRunSchema.index({ runKey: 1, startedAt: -1 });
 supportEmailRunSchema.index({ startedAt: -1 });
+supportEmailRunSchema.index(
+  { runKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { activeLock: true },
+    name: 'runKey_1_active_lock'
+  }
+);
 
 module.exports = mongoose.model('SupportEmailRun', supportEmailRunSchema);

@@ -18,6 +18,7 @@ const assessment4Routes = require('./routes/assessment4Routes');
 const assessment5Routes = require('./routes/assessment5Routes');
 const adminRoutes = require('./routes/adminRoutes');
 const whatsappOpsAdminRoutes = require('./routes/whatsappOpsAdminRoutes');
+const supportEmailAdminRoutes = require('./routes/supportEmailAdminRoutes');
 const leadInsightsRoutes = require('./routes/leadInsightsRoutes');
 const analyticsExecutiveRoutes = require('./routes/analyticsExecutiveRoutes');
 const influencerRoutes = require('./routes/influencerRoutes');
@@ -222,6 +223,8 @@ app.use('/api/api/blogs', blogRoutes);
 app.use('/api/posters', posterTemplatePublicRoutes);
 // WhatsApp Messaging Ops console — explicit mount before generic /api/admin (same middleware stack elsewhere).
 app.use('/api/admin/whatsapp-ops', requireAdmin, whatsappOpsAdminRoutes);
+// Support-email manual Graph recovery. requireAdmin authenticates; the route requires a super admin.
+app.use('/api/admin/support-email', requireAdmin, supportEmailAdminRoutes);
 app.use('/api/admin/whatsapp-chat', requireAdmin, whatsappChatAdminRoutes);
 app.use('/api/admin/ai-calls', requireAdmin, aiCallsAdminRoutes);
 app.use('/api/admin/lead-insights', requireAdmin, leadInsightsRoutes);

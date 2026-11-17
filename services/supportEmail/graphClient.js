@@ -21,6 +21,70 @@ class GraphDeltaTokenExpiredError extends GraphClientError {}
 class GraphThrottledError extends GraphClientError {}
 
 /**
+ * Transport failures that may occur after Microsoft Graph has already accepted a
+ * non-idempotent POST /subscriptions. These must not be retried automatically.
+ */
+const AMBIGUOUS_SUBSCRIPTION_POST_NETWORK_CODES = Object.freeze([
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'EPIPE',
+  'ERR_SOCKET_CONNECTION_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT'
+]);
+
+/**
+ * Graph 401 error codes that prove the token was rejected before the resource
+ * operation ran. A single token-refresh retry is safe only for these codes.
+ * A bare 401 with no such code is ambiguous for POST /subscriptions.
+ */
+const AUTH_REJECTION_BEFORE_PROCESSING_CODES = new Set([
+  'InvalidAuthenticationToken',
+  'AuthenticationTokenExpired',
+  'ExpiredAuthenticationToken',
+  'InvalidAuthenticationTokenTenant'
+]);
+
+function requestPathname(rawUrl) {
+  const withoutQuery = String(rawUrl || '').split('?')[0];
+  try {
+    return new URL(withoutQuery, 'https://graph.microsoft.com').pathname.replace(/\/+$/, '');
+  } catch {
+    return withoutQuery.replace(/\/+$/, '');
+  }
+}
+
+/**
+ * POST /subscriptions creates a remote resource and is not idempotent.
+ * POST /subscriptions/{id}/... and other methods are not creation calls.
+ */
+function isGraphSubscriptionCreate(method, rawUrl) {
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  return /\/subscriptions$/i.test(requestPathname(rawUrl));
+}
+
+function graphErrorCode(graphError) {
+  if (!graphError || typeof graphError !== 'object') return '';
+  return String(
+    graphError.code ||
+    graphError.innerError?.code ||
+    graphError.innererror?.code ||
+    ''
+  );
+}
+
+function isAuthRejectedBeforeProcessing(graphError) {
+  return AUTH_REJECTION_BEFORE_PROCESSING_CODES.has(graphErrorCode(graphError));
+}
+
+function ambiguousGraphError(message, fields) {
+  const error = new GraphClientError(message, fields);
+  error.ambiguousOutcome = true;
+  return error;
+}
+
+/**
  * Resilient Microsoft Graph HTTP Client
  */
 class GraphClient {
@@ -71,12 +135,21 @@ class GraphClient {
    * @param {Object} [options.headers]
    * @param {Object} [options.params]
    * @param {any} [options.data]
+   * @param {boolean} [options.noRetryOnAmbiguous=false] When true, 5xx, HTTP 408,
+   *   HTTP 429 and ambiguous transport errors are thrown immediately (with
+   *   `ambiguousOutcome: true`) instead of being retried. POST /subscriptions
+   *   always uses this policy, even when the flag is omitted. A 401 is retried
+   *   once only when Graph's error code proves the token was rejected before
+   *   the resource operation ran. Safe requests still honor Retry-After.
    * @returns {Promise<any>} Response body
    */
-  async request({ url, method = 'GET', headers = {}, params = {}, data = null }) {
+  async request({ url, method = 'GET', headers = {}, params = {}, data = null, noRetryOnAmbiguous = false }) {
     const isAbsolute = /^https?:\/\//i.test(url);
     const fullUrl = isAbsolute ? url : `${this.baseUrl.replace(/\/+$/, '')}/${url.replace(/^\/+/, '')}`;
     const sanitizedPath = this._sanitizeUrl(fullUrl);
+    // POST /subscriptions is non-idempotent even when the caller forgets the flag.
+    // Safe methods (GET/PATCH/DELETE and unrelated POSTs) keep their retry policy.
+    const suppressAmbiguousRetry = noRetryOnAmbiguous || isGraphSubscriptionCreate(method, fullUrl);
 
     let attempt = 0;
     let authRetried = false;
@@ -118,8 +191,19 @@ class GraphClient {
         const errorCode = graphError?.code || err.code || 'UNKNOWN';
         const errorMsg = graphError?.message || err.message;
 
-        // 1. HTTP 401 Unauthorized: Invalidate cached token and retry once
+        // 1. HTTP 401 Unauthorized.
+        // A Graph authentication error code proves the token was rejected before the
+        // resource operation. One refresh retry is then safe, including for POST /subscriptions.
+        // A 401 without that proof may have been produced by a proxy after the body was
+        // accepted, so subscription creation does not retry it.
         if (status === 401 && !authRetried) {
+          const rejectedBeforeProcessing = isAuthRejectedBeforeProcessing(graphError);
+          if (suppressAmbiguousRetry && !rejectedBeforeProcessing) {
+            throw ambiguousGraphError(
+              `Graph API request failed with ambiguous outcome (HTTP 401): ${errorMsg}`,
+              { statusCode: 401, code: errorCode, url: sanitizedPath, details: graphError?.innerError }
+            );
+          }
           authRetried = true;
           this.authService.clearCachedToken();
           continue;
@@ -158,10 +242,25 @@ class GraphClient {
           );
         }
 
-        // 5. HTTP 429 Too Many Requests (Rate limit throttling)
+        // 5. HTTP 429 Too Many Requests (Rate limit throttling).
+        // Retry-After is honored for safe requests. POST /subscriptions is not retried:
+        // Graph may have created the subscription before returning 429.
         if (status === 429) {
           const retryAfterHeader = responseHeaders['retry-after'];
           const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null;
+
+          if (suppressAmbiguousRetry) {
+            throw ambiguousGraphError(
+              `Graph API request failed with ambiguous outcome (HTTP 429): ${errorMsg}`,
+              {
+                statusCode: 429,
+                code: errorCode || 'THROTTLED',
+                retryAfter: retryAfterSec,
+                url: sanitizedPath,
+                details: graphError?.innerError
+              }
+            );
+          }
 
           if (attempt <= this.maxRetries) {
             const delayMs = this._calculateBackoff(attempt, retryAfterSec);
@@ -175,14 +274,34 @@ class GraphClient {
           );
         }
 
-        // 6. Transient 5xx Errors (500, 502, 503, 504) or Network Timeout
+        // 6. Transient server / transport failures.
+        // Timeouts, connection resets and 5xx responses are ambiguous for POST /subscriptions
+        // and are thrown once. GET/PATCH/DELETE keep exponential backoff. DNS failures
+        // (ENOTFOUND) are still retried for every method because the TCP connection was
+        // not established.
         const isTransient5xx = status >= 500 && status <= 504;
         const isNetworkTimeout = ['ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET'].includes(err.code);
+        const isAmbiguousSubscriptionTransport = AMBIGUOUS_SUBSCRIPTION_POST_NETWORK_CODES.includes(err.code);
+        const isAmbiguousSubscriptionStatus = status === 408 || (status >= 500 && status <= 599);
 
-        if ((isTransient5xx || isNetworkTimeout) && attempt <= this.maxRetries) {
-          const delayMs = this._calculateBackoff(attempt);
-          await this.sleepFn(delayMs);
-          continue;
+        if (suppressAmbiguousRetry && (isAmbiguousSubscriptionTransport || isAmbiguousSubscriptionStatus)) {
+          throw ambiguousGraphError(
+            `Graph API request failed with ambiguous outcome (HTTP ${status || err.code || 'network'}): ${errorMsg}`,
+            {
+              statusCode: status,
+              code: errorCode,
+              url: sanitizedPath,
+              details: graphError?.innerError
+            }
+          );
+        }
+
+        if (isTransient5xx || isNetworkTimeout) {
+          if (attempt <= this.maxRetries) {
+            const delayMs = this._calculateBackoff(attempt);
+            await this.sleepFn(delayMs);
+            continue;
+          }
         }
 
         // Terminal error
@@ -208,6 +327,29 @@ class GraphClient {
     return this.request({ ...options, url, method: 'GET' });
   }
 
+  /**
+   * Opens a read-only byte stream. Callers enforce the byte cap and destroy the stream.
+   * This does not change the JSON request() retry policy.
+   */
+  async openByteStream(url, { maxBytes } = {}) {
+    const token = await this.authService.getAccessToken();
+    const isAbsolute = /^https?:\/\//i.test(url);
+    const fullUrl = isAbsolute ? url : `${this.baseUrl.replace(/\/+$/, '')}/${String(url || '').replace(/^\/+/, '')}`;
+    const response = await this.httpRequester({
+      url: fullUrl,
+      method: 'GET',
+      responseType: 'stream',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/octet-stream'
+      },
+      timeout: this.timeoutMs,
+      maxContentLength: maxBytes,
+      maxBodyLength: maxBytes
+    });
+    return response.data;
+  }
+
   post(url, data, options = {}) {
     return this.request({ ...options, url, method: 'POST', data });
   }
@@ -219,6 +361,8 @@ module.exports = {
   GraphForbiddenError,
   GraphNotFoundError,
   GraphDeltaTokenExpiredError,
-  GraphThrottledError
+  GraphThrottledError,
+  isGraphSubscriptionCreate,
+  isAuthRejectedBeforeProcessing
 };
 

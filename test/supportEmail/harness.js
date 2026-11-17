@@ -15,6 +15,7 @@ const SupportEmailAuditLog = require('../../models/SupportEmailAuditLog');
 const SupportEmailWebhookEvent = require('../../models/SupportEmailWebhookEvent');
 const EmailSyncCursor = require('../../models/EmailSyncCursor');
 const GraphSubscription = require('../../models/GraphSubscription');
+const GraphSubscriptionOperation = require('../../models/GraphSubscriptionOperation');
 const GoogleSheetsSyncJob = require('../../models/GoogleSheetsSyncJob');
 const SupportEmailRun = require('../../models/SupportEmailRun');
 const EmailIngestionPolicy = require('../../models/EmailIngestionPolicy');
@@ -31,6 +32,7 @@ const ALL_SUPPORT_MODELS = [
   SupportEmailWebhookEvent,
   EmailSyncCursor,
   GraphSubscription,
+  GraphSubscriptionOperation,
   GoogleSheetsSyncJob,
   SupportEmailRun,
   EmailIngestionPolicy,

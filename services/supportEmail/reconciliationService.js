@@ -7,6 +7,7 @@ const { SubscriptionService } = require('./subscriptionService');
 const { runCoalescedSync, acquireSyncLock, signalMailboxSync } = require('./mailboxSyncService');
 const { createSyncPassFn } = require('./deltaSyncService');
 const { GraphClient } = require('./graphClient');
+const { logOperationalEvent, incrementMetric, summarizeError } = require('./observability');
 
 const defaultSubscriptionService = new SubscriptionService();
 const RECONCILIATION_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes default delta catchup
@@ -45,6 +46,12 @@ async function reconcileMailbox({
   const normFolder = folder.trim().toLowerCase();
   const now = new Date();
 
+  incrementMetric('reconciliation_mailbox_started', 1);
+  logOperationalEvent('info', 'support_email_reconciliation_started', {
+    mailbox: normMailbox,
+    folder: normFolder
+  });
+
   // 1. Verify policy is enabled
   const policy = await EmailIngestionPolicy.findOne({
     mailbox: normMailbox,
@@ -52,6 +59,11 @@ async function reconcileMailbox({
   }).lean();
 
   if (!policy) {
+    logOperationalEvent('info', 'support_email_reconciliation_skipped', {
+      mailbox: normMailbox,
+      folder: normFolder,
+      reason: 'policy_disabled_or_missing'
+    });
     return {
       mailbox: normMailbox,
       folder: normFolder,
@@ -60,16 +72,67 @@ async function reconcileMailbox({
     };
   }
 
-  // 2. Subscription Health Check & Repair
+  // 2. Subscription Health Check & Remote Orphan Reconciliation
   let subHealth = null;
   try {
     subHealth = await subscriptionSvc.syncSubscriptionHealth({
       mailbox: normMailbox,
       folder: normFolder
     });
+    // Scheduled remote orphan discovery & cleanup pass
+    const orphanRecon = await subscriptionSvc.reconcileRemoteSubscriptions({
+      mailbox: normMailbox,
+      folder: normFolder,
+      deleteOrphans: true
+    }).catch((orphanErr) => {
+      logOperationalEvent('warn', 'support_email_orphan_reconciliation_failed', {
+        mailbox: normMailbox,
+        folder: normFolder,
+        ...summarizeError(orphanErr)
+      });
+      return { error: summarizeError(orphanErr).errorMessage };
+    });
+
+    if (orphanRecon && Array.isArray(orphanRecon.failedDeletions) && orphanRecon.failedDeletions.length > 0) {
+      logOperationalEvent('warn', 'support_email_orphan_deletion_partial_failure', {
+        mailbox: normMailbox,
+        folder: normFolder,
+        failedCount: orphanRecon.failedDeletions.length,
+        failures: orphanRecon.failedDeletions.map((f) => ({
+          subscriptionId: f.id,
+          errorMessage: f.error
+        }))
+      });
+    }
+
+    if (subHealth && typeof subHealth === 'object') {
+      subHealth.orphanReconciliation = orphanRecon;
+    }
+
+    if (orphanRecon && typeof orphanRecon === 'object' && !orphanRecon.error) {
+      if (orphanRecon.remoteOrphansCount > 0 || orphanRecon.deletedRemoteCount > 0) {
+        incrementMetric('reconciliation_remote_orphans_detected', orphanRecon.remoteOrphansCount || 0);
+        incrementMetric('reconciliation_remote_orphans_deleted', orphanRecon.deletedRemoteCount || 0);
+        logOperationalEvent('warn', 'support_email_orphan_reconciliation', {
+          mailbox: normMailbox,
+          folder: normFolder,
+          remoteOrphans: orphanRecon.remoteOrphansCount || 0,
+          deletedRemote: orphanRecon.deletedRemoteCount || 0,
+          inFlightRemote: orphanRecon.inFlightRemoteCount || 0,
+          enumerationComplete: orphanRecon.completedEnumeration !== false
+        });
+      }
+    }
   } catch (subErr) {
     // If Graph subscription fails, record error but proceed to delta catchup
     subHealth = { error: subErr.message };
+    incrementMetric('reconciliation_subscription_failure', 1);
+    logOperationalEvent('error', 'support_email_subscription_health_failure', {
+      mailbox: normMailbox,
+      folder: normFolder,
+      errorName: subErr.name,
+      errorCode: subErr.code || subErr.statusCode || null
+    });
   }
 
   // 3. Evaluate Sync Need
@@ -124,6 +187,15 @@ async function reconcileMailbox({
     folder: normFolder,
     syncPassFn,
     maxPasses
+  }).catch((syncErr) => {
+    incrementMetric('reconciliation_delta_sync_failure', 1);
+    logOperationalEvent('error', 'support_email_delta_sync_failure', {
+      mailbox: normMailbox,
+      folder: normFolder,
+      errorName: syncErr.name,
+      errorCode: syncErr.code || syncErr.statusCode || null
+    });
+    throw syncErr;
   });
 
   // 5. Update Webhook Event Statuses for this Mailbox
@@ -139,6 +211,16 @@ async function reconcileMailbox({
       }
     }
   );
+
+  incrementMetric('reconciliation_mailbox_completed', 1);
+  logOperationalEvent('info', 'support_email_reconciliation_completed', {
+    mailbox: normMailbox,
+    folder: normFolder,
+    synced: true,
+    passes: syncResult?.passes ?? null,
+    ingested: syncResult?.totalIngested ?? 0,
+    hasPendingSync: syncResult?.hasPendingSync ?? false
+  });
 
   return {
     mailbox: normMailbox,
@@ -170,6 +252,11 @@ async function runAllReconciliations({
   const policies = await EmailIngestionPolicy.find({ enabled: true }).lean();
   const results = [];
 
+  logOperationalEvent('info', 'support_email_reconciliation_run_started', {
+    policyCount: policies.length,
+    batchBudgetMs
+  });
+
   for (const policy of policies) {
     if (Date.now() - startTime > batchBudgetMs) {
       // Exceeded budget; break cleanly to avoid Vercel timeout
@@ -186,6 +273,12 @@ async function runAllReconciliations({
       });
       results.push(outcome);
     } catch (err) {
+      incrementMetric('reconciliation_mailbox_failure', 1);
+      logOperationalEvent('error', 'support_email_reconciliation_mailbox_failure', {
+        mailbox: policy.mailbox,
+        errorName: err.name,
+        errorCode: err.code || err.statusCode || null
+      });
       results.push({
         mailbox: policy.mailbox,
         error: err.message
@@ -193,12 +286,20 @@ async function runAllReconciliations({
     }
   }
 
-  return {
+  const summary = {
     totalPolicies: policies.length,
     processedCount: results.length,
     durationMs: Date.now() - startTime,
     results
   };
+
+  logOperationalEvent('info', 'support_email_reconciliation_run_completed', {
+    totalPolicies: summary.totalPolicies,
+    processedCount: summary.processedCount,
+    durationMs: summary.durationMs
+  });
+
+  return summary;
 }
 
 module.exports = {

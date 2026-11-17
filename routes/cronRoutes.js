@@ -432,6 +432,36 @@ router.all('/support-email-reconcile', verifyCronSecret, async (req, res) => {
   }
 });
 
+router.all('/support-email-retention', verifyCronSecret, async (req, res) => {
+  try {
+    const { runAttachmentRetention } = require('../services/supportEmail/attachmentRetentionService');
+    const report = await runAttachmentRetention({ execute: req.query.execute === '1' });
+    return res.status(200).json({
+      success: true,
+      message: report.execute ? 'Support email retention completed' : 'Support email retention dry run',
+      report
+    });
+  } catch (error) {
+    return failCron(res, error, '[Cron] support-email-retention:');
+  }
+});
+
+router.all('/process-support-email', verifyCronSecret, async (req, res) => {
+  try {
+    const { runProcessingBatch } = require('../services/supportEmail/pipelineService');
+    const outcome = await runProcessingBatch();
+    return res.status(200).json({
+      success: true,
+      message: outcome.enabled
+        ? 'Support email processing completed'
+        : 'Support email processing is disabled',
+      outcome
+    });
+  } catch (error) {
+    return failCron(res, error, '[Cron] process-support-email:');
+  }
+});
+
 router.get('/health', (req, res) => {
   res.status(200).json({
     success: true,
