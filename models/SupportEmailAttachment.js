@@ -100,5 +100,6 @@ const supportEmailAttachmentSchema = new mongoose.Schema(
 supportEmailAttachmentSchema.index({ emailId: 1, graphAttachmentId: 1 }, { unique: true });
 supportEmailAttachmentSchema.index({ emailId: 1, isInline: 1 });
 supportEmailAttachmentSchema.index({ sha256: 1 });
+supportEmailAttachmentSchema.index({ createdAt: 1 }, { name: 'createdAt_1' });
 
 module.exports = mongoose.model('SupportEmailAttachment', supportEmailAttachmentSchema);

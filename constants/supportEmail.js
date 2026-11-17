@@ -83,6 +83,7 @@ const TICKET_PRIORITIES = Object.freeze([
 
 const TICKET_STATUSES = Object.freeze([
   'open',
+  'needs_review',
   'in_progress',
   'waiting_on_student',
   'resolved',
