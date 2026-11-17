@@ -148,7 +148,6 @@ async function verifyOtp(mobile, rawOtp) {
   if (!recordUsable) {
     const provider = await msg91.verifySentOtp(mobile, otp);
     if (provider === 'valid') {
-      await otpRepository.deleteOtp(mobile);
       return finishVerified(mobile);
     }
     return {
@@ -183,13 +182,13 @@ async function verifyOtp(mobile, rawOtp) {
     };
   }
 
-  await otpRepository.deleteOtp(mobile);
   return finishVerified(mobile);
 }
 
 async function finishVerified(mobile) {
   const { pub } = await loadRecords(mobile);
   if (pub.eligibility === ELIGIBILITY.FORM_INCOMPLETE) {
+    await otpRepository.deleteOtp(mobile);
     return {
       status: 200,
       clearPending: true,
@@ -213,6 +212,7 @@ async function finishVerified(mobile) {
     mobile,
     expiresAt,
   });
+  await otpRepository.deleteOtp(mobile);
 
   return {
     status: 200,
