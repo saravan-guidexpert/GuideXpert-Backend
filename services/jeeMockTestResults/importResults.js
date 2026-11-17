@@ -10,6 +10,7 @@ const DATA_PATH = path.join(__dirname, '../../data/jeeMockTestResults.json');
 const SAMPLE_MOBILE = '9347763131';
 
 function loadRows() {
+  if (!fs.existsSync(DATA_PATH)) return [];
   const rows = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
   if (!Array.isArray(rows) || !rows.length) throw new Error('JEE mock test result file is empty');
   assertUniqueMobiles(rows);
@@ -72,7 +73,14 @@ async function ensureJeeMockTestResultsImported({ refresh = false } = {}) {
   if (process.env.JEE_RESULTS_SKIP_IMPORT === '1' && !refresh) {
     return { skipped: true };
   }
-  const rows = loadRows();
+  let rows = [];
+  try {
+    rows = loadRows();
+  } catch (error) {
+    console.error('[jee-results] import file', error && error.message ? error.message : error);
+    return { skipped: true };
+  }
+  if (!rows.length) return { skipped: true };
   if (refresh) await JeeMockTestResult.deleteMany({});
   const existing = await JeeMockTestResult.estimatedDocumentCount();
   let imported = false;
@@ -85,7 +93,11 @@ async function ensureJeeMockTestResultsImported({ refresh = false } = {}) {
       if (!duplicate) throw error;
     }
   }
-  await ensureSampleRegistration(rows);
+  try {
+    await ensureSampleRegistration(rows);
+  } catch (error) {
+    console.error('[jee-results] sample registration', error && error.message ? error.message : error);
+  }
   return { imported, count: rows.length };
 }
 
