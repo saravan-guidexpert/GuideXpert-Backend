@@ -327,6 +327,150 @@ test('GraphClient: request timeout triggers retry and eventually surfaces client
   assert.equal(attempts, 3); // initial attempt + 2 retries
 });
 
+test('GraphClient: POST /subscriptions does not retry ambiguous timeout, reset, or 5xx outcomes', async () => {
+  const cases = [
+    { code: 'ETIMEDOUT', message: 'timeout of 15000ms exceeded' },
+    { code: 'ECONNRESET', message: 'socket hang up' },
+    { code: 'ECONNABORTED', message: 'timeout of 15000ms exceeded' },
+    { status: 500, code: 'InternalServerError' },
+    { status: 503, code: 'ServiceUnavailable' },
+    { status: 504, code: 'GatewayTimeout' }
+  ];
+
+  for (const failure of cases) {
+    let attempts = 0;
+    let slept = 0;
+    const client = new GraphClient({
+      authService: { getAccessToken: async () => 'token', clearCachedToken() {} },
+      httpRequester: async () => {
+        attempts += 1;
+        const err = new Error(failure.message || 'ambiguous');
+        if (failure.status) {
+          err.response = { status: failure.status, data: { error: { code: failure.code, message: err.message } } };
+        } else {
+          err.code = failure.code;
+        }
+        throw err;
+      },
+      maxRetries: 3,
+      baseBackoffMs: 1,
+      sleepFn: async () => { slept += 1; }
+    });
+
+    await assert.rejects(
+      () => client.post('/subscriptions', { changeType: 'created' }),
+      (err) => err instanceof GraphClientError && err.ambiguousOutcome === true
+    );
+    assert.equal(attempts, 1, `POST /subscriptions must not be retried after ${failure.code || failure.status}`);
+    assert.equal(slept, 0);
+  }
+});
+
+test('GraphClient: POST /subscriptions retries one 401 only when Graph rejected the token before processing', async () => {
+  let attempts = 0;
+  let cleared = 0;
+  const client = new GraphClient({
+    authService: {
+      getAccessToken: async () => 'token',
+      clearCachedToken() { cleared += 1; }
+    },
+    httpRequester: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const err = new Error('expired');
+        err.response = {
+          status: 401,
+          data: { error: { code: 'InvalidAuthenticationToken', message: 'Access token has expired' } }
+        };
+        throw err;
+      }
+      return { status: 200, data: { id: 'sub-after-refresh' } };
+    },
+    maxRetries: 3,
+    sleepFn: async () => {}
+  });
+
+  const created = await client.post('/subscriptions', { changeType: 'created' });
+  assert.equal(created.id, 'sub-after-refresh');
+  assert.equal(attempts, 2);
+  assert.equal(cleared, 1);
+});
+
+test('GraphClient: POST /subscriptions does not retry a 401 that lacks proof of pre-processing rejection', async () => {
+  let attempts = 0;
+  let cleared = 0;
+  const client = new GraphClient({
+    authService: {
+      getAccessToken: async () => 'token',
+      clearCachedToken() { cleared += 1; }
+    },
+    httpRequester: async () => {
+      attempts += 1;
+      const err = new Error('unauthorized');
+      err.response = { status: 401, data: {} };
+      throw err;
+    },
+    maxRetries: 3,
+    sleepFn: async () => {}
+  });
+
+  await assert.rejects(
+    () => client.post('/subscriptions', { changeType: 'created' }),
+    (err) => err.ambiguousOutcome === true && err.statusCode === 401
+  );
+  assert.equal(attempts, 1);
+  assert.equal(cleared, 0);
+});
+
+test('GraphClient: POST /subscriptions does not retry HTTP 429, while GET still honors Retry-After', async () => {
+  let postAttempts = 0;
+  const postClient = new GraphClient({
+    authService: { getAccessToken: async () => 'token', clearCachedToken() {} },
+    httpRequester: async () => {
+      postAttempts += 1;
+      const err = new Error('throttled');
+      err.response = {
+        status: 429,
+        headers: { 'retry-after': '2' },
+        data: { error: { code: 'ApplicationThrottled', message: 'Too many requests' } }
+      };
+      throw err;
+    },
+    maxRetries: 3,
+    sleepFn: async () => { throw new Error('subscription POST must not sleep for Retry-After'); }
+  });
+
+  await assert.rejects(
+    () => postClient.post('/subscriptions', { changeType: 'created' }),
+    (err) => err.ambiguousOutcome === true && err.statusCode === 429 && err.retryAfter === 2
+  );
+  assert.equal(postAttempts, 1);
+
+  let getAttempts = 0;
+  const slept = [];
+  const getClient = new GraphClient({
+    authService: { getAccessToken: async () => 'token' },
+    httpRequester: async () => {
+      getAttempts += 1;
+      if (getAttempts === 1) {
+        const err = new Error('throttled');
+        err.response = {
+          status: 429,
+          headers: { 'retry-after': '2' },
+          data: { error: { code: 'ApplicationThrottled', message: 'Too many requests' } }
+        };
+        throw err;
+      }
+      return { status: 200, data: { ok: true } };
+    },
+    sleepFn: async (ms) => { slept.push(ms); }
+  });
+  const body = await getClient.get('/subscriptions');
+  assert.equal(body.ok, true);
+  assert.equal(getAttempts, 2);
+  assert.deepEqual(slept, [2000]);
+});
+
 // 9. Delta pagination across multiple pages
 test('deltaSyncService: delta pagination follows @odata.nextLink across multiple pages and ingests', async () => {
   const mailbox = 'support@guidexpert.com';
