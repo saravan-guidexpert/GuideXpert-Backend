@@ -5,7 +5,6 @@ const path = require('path');
 const { jsPDF } = require('jspdf');
 const {
   formatScorePair,
-  formatPercentage,
   formatDuration,
   formatInvitedOn,
 } = require('./format');
@@ -36,7 +35,6 @@ function buildResultPdf(result) {
     ['Invited on', formatInvitedOn(result.invitedOn)],
     ['Attempt status', 'Attempted'],
     ['Overall marks', formatScorePair(result.overall && result.overall.obtained, result.overall && result.overall.total)],
-    ['Percentage', formatPercentage(result.overall && result.overall.percentage) || 'Not available'],
     ['MCQ marks', formatScorePair(result.mcq && result.mcq.obtained, result.mcq && result.mcq.total)],
     ['MCQ time', formatDuration(result.mcq && result.mcq.durationMinutes)],
     ['Numerical marks', formatScorePair(result.numerical && result.numerical.obtained, result.numerical && result.numerical.total)],
