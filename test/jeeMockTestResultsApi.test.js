@@ -15,6 +15,7 @@ const { setJeeResultOtpSenderForTests } = require('../services/jeeMockTestResult
 const JeeMainMockTestLead = require('../models/JeeMainMockTestLead');
 const JeeMockTestResult = require('../models/JeeMockTestResult');
 const JeeMockTestResultSession = require('../models/JeeMockTestResultSession');
+const JeeMockTestResultActivity = require('../models/JeeMockTestResultActivity');
 const OtpVerification = require('../models/OtpVerification');
 
 let mongo;
@@ -195,11 +196,22 @@ describe('JEE mock test result access', { timeout: 180000, concurrency: 1 }, () 
     assert.equal(serialized.includes('percentile'), false);
     assert.equal(serialized.includes('rank'), false);
 
+    const viewed = await JeeMockTestResultActivity.findOne({ mobile: '9000000001' }).lean();
+    assert.equal(viewed.viewCount, 1);
+    assert.equal(viewed.downloadCount, 0);
+    assert.equal(viewed.studentName, 'Attempted Student');
+    assert.ok(viewed.lastViewedAt);
+
     const pdf = await request('GET', '/api/jee-main-mock-test/results/pdf', { jar });
     assert.equal(pdf.status, 200);
     assert.match(pdf.type, /application\/pdf/);
     assert.equal(pdf.payload.subarray(0, 4).toString(), '%PDF');
     assert.match(pdf.cache, /no-store/);
+    const downloaded = await JeeMockTestResultActivity.findOne({ mobile: '9000000001' }).lean();
+    assert.equal(downloaded.viewCount, 1);
+    assert.equal(downloaded.downloadCount, 1);
+    assert.ok(downloaded.lastDownloadedAt);
+    assert.equal(JSON.stringify(me.payload).includes('9000000001'), false);
 
     const loggedOut = await request('POST', '/api/jee-main-mock-test/results/logout', { jar });
     assert.equal(loggedOut.status, 200);
@@ -243,6 +255,9 @@ describe('JEE mock test result access', { timeout: 180000, concurrency: 1 }, () 
     const pdf = await request('GET', '/api/jee-main-mock-test/results/pdf', { jar });
     assert.equal(pdf.status, 403);
     assert.equal(pdf.payload.code, 'PDF_UNAVAILABLE');
+    const activity = await JeeMockTestResultActivity.findOne({ mobile: '9000000002' }).lean();
+    assert.equal(activity.viewCount, 1);
+    assert.equal(activity.downloadCount, 0);
   });
 
   test('a completed registration with no exam row is pending, and an expired session is rejected', async () => {

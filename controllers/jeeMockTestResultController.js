@@ -1,6 +1,7 @@
 'use strict';
 
 const access = require('../services/jeeMockTestResults/access');
+const { recordJeeResultActivity, listJeeResultActivity } = require('../services/jeeMockTestResults/activity');
 const { buildResultPdf } = require('../services/jeeMockTestResults/pdf');
 const {
   pendingMobileFromRequest,
@@ -60,9 +61,27 @@ async function verifyOtp(req, res) {
   return res.status(result.status).json(result.body);
 }
 
+async function remember(result, kind) {
+  const pub = result && result.body && result.body.result;
+  if (!result || !result.ok || !pub || !result.mobile) return;
+  try {
+    await recordJeeResultActivity({
+      mobile: result.mobile,
+      studentName: pub.studentName,
+      eligibility: pub.eligibility,
+      attemptStatus: pub.attemptStatus,
+      overall: pub.overall,
+      kind,
+    });
+  } catch (error) {
+    console.error('[jee-results] activity', error && error.message ? error.message : error);
+  }
+}
+
 async function me(req, res) {
   noStore(res);
   const result = await access.currentResult(sessionTokenFromRequest(req));
+  await remember(result, 'view');
   return res.status(result.status).json(result.body);
 }
 
@@ -70,10 +89,21 @@ async function pdf(req, res) {
   noStore(res);
   const result = await access.resultPdf(sessionTokenFromRequest(req));
   if (!result.ok) return res.status(result.status).json(result.body);
+  await remember(result, 'pdf');
   const file = buildResultPdf(result.result);
   res.set('Content-Type', 'application/pdf');
   res.set('Content-Disposition', 'attachment; filename="JEE-Main-Mock-Test-Result.pdf"');
   return res.status(200).send(file);
+}
+
+async function activity(req, res) {
+  const data = await listJeeResultActivity({
+    q: req.query.q,
+    status: req.query.status,
+    page: req.query.page,
+    limit: req.query.limit,
+  });
+  return res.status(200).json({ success: true, ...data });
 }
 
 async function logout(req, res) {
@@ -105,4 +135,5 @@ module.exports = {
   me: wrap(me),
   pdf: wrap(pdf),
   logout: wrap(logout),
+  activity: wrap(activity),
 };

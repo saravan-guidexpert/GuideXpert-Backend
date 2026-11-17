@@ -237,7 +237,7 @@ async function currentResult(token) {
       },
     };
   }
-  return { ok: true, status: 200, body: { success: true, result: pub } };
+  return { ok: true, status: 200, mobile: session.mobile, body: { success: true, result: pub } };
 }
 
 async function resultPdf(token) {
@@ -254,7 +254,7 @@ async function resultPdf(token) {
       },
     };
   }
-  return { ok: true, result: current.body.result };
+  return { ok: true, mobile: current.mobile, body: current.body, result: current.body.result };
 }
 
 async function logout(token) {
