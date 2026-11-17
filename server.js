@@ -18,6 +18,7 @@ const assessment4Routes = require('./routes/assessment4Routes');
 const assessment5Routes = require('./routes/assessment5Routes');
 const adminRoutes = require('./routes/adminRoutes');
 const whatsappOpsAdminRoutes = require('./routes/whatsappOpsAdminRoutes');
+const supportEmailAdminRoutes = require('./routes/supportEmailAdminRoutes');
 const leadInsightsRoutes = require('./routes/leadInsightsRoutes');
 const analyticsExecutiveRoutes = require('./routes/analyticsExecutiveRoutes');
 const influencerRoutes = require('./routes/influencerRoutes');
@@ -61,6 +62,7 @@ const posterTemplatePublicRoutes = require('./routes/posterTemplatePublicRoutes'
 const osviRoutes = require('./routes/osviRoutes');
 const counsellorSupportRoutes = require('./routes/counsellorSupportRoutes');
 const gupshupWebhookRoutes = require('./routes/gupshupWebhookRoutes');
+const supportEmailWebhookRoutes = require('./routes/supportEmailWebhookRoutes');
 const whatsappChatAdminRoutes = require('./routes/whatsappChatAdminRoutes');
 const aiCallsAdminRoutes = require('./routes/aiCallsAdminRoutes');
 const whatsappChatBdaRoutes = require('./routes/whatsappChatBdaRoutes');
@@ -141,8 +143,20 @@ app.use(express.urlencoded({ extended: true }));
 // connectDB caches one attempt and will not open a second client while the first
 // is still connecting or while an existing client can recover.
 
+const GRAPH_WEBHOOK_EXACT_PATHS = new Set([
+  '/api/support-email/webhooks/graph',
+  '/api/support-email/webhooks/graph/',
+  '/api/support-email/webhooks/graph/lifecycle',
+  '/api/support-email/webhooks/graph/lifecycle/'
+]);
+
 function shouldBypassDbGate(req) {
   if (req.path === '/api/health') return true;
+  // Microsoft Graph subscription validation handshake must never be blocked by database connection.
+  // Restricted strictly to the exact primary and lifecycle webhook endpoints.
+  if (GRAPH_WEBHOOK_EXACT_PATHS.has(req.path) && req.query && typeof req.query.validationToken !== 'undefined') {
+    return true;
+  }
   if (req.method !== 'GET') return false;
   return /^\/(?:api\/)?blogs(?:\/[^/]+)?\/?$/.test(req.path);
 }
@@ -209,6 +223,8 @@ app.use('/api/api/blogs', blogRoutes);
 app.use('/api/posters', posterTemplatePublicRoutes);
 // WhatsApp Messaging Ops console — explicit mount before generic /api/admin (same middleware stack elsewhere).
 app.use('/api/admin/whatsapp-ops', requireAdmin, whatsappOpsAdminRoutes);
+// Support-email manual Graph recovery. requireAdmin authenticates; the route requires a super admin.
+app.use('/api/admin/support-email', requireAdmin, supportEmailAdminRoutes);
 app.use('/api/admin/whatsapp-chat', requireAdmin, whatsappChatAdminRoutes);
 app.use('/api/admin/ai-calls', requireAdmin, aiCallsAdminRoutes);
 app.use('/api/admin/lead-insights', requireAdmin, leadInsightsRoutes);
@@ -270,6 +286,8 @@ app.use('/api/osvi', osviRoutes);
 app.use('/api/counsellor-support', counsellorSupportRoutes);
 // Gupshup app callback URL (production): POST https://<API_HOST>/webhook/gupshup — configure in Gupshup console; no admin auth.
 app.use('/webhook/gupshup', gupshupWebhookRoutes);
+// Microsoft Graph Support Email Notification Webhook (validation & notification callbacks)
+app.use('/api/support-email/webhooks/graph', supportEmailWebhookRoutes);
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Not found' });
 });
@@ -361,4 +379,5 @@ if (require.main === module) {
   startServer();
 }
 
+app.shouldBypassDbGate = shouldBypassDbGate;
 module.exports = app;
