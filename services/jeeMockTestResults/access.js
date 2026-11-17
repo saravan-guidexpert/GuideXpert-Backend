@@ -21,7 +21,11 @@ const {
   newSessionToken,
 } = require('./cookies');
 
-const OTP_EXPIRY_MS = () => (Number(process.env.OTP_EXPIRY_MINUTES) || 10) * 60 * 1000;
+const OTP_EXPIRY_MS = () => {
+  const minutes = Number(process.env.OTP_EXPIRY_MINUTES);
+  const safeMinutes = Number.isFinite(minutes) && minutes >= 5 ? minutes : 10;
+  return safeMinutes * 60 * 1000;
+};
 const MAX_VERIFY_ATTEMPTS = 3;
 
 let sendSms = (phone, otp) => msg91.sendOtp(phone, otp);
@@ -140,17 +144,21 @@ async function verifyOtp(mobile, rawOtp) {
   }
 
   const record = await otpRepository.getLatest(mobile);
-  if (!record) {
+  const recordUsable = record && new Date(record.expiresAt).getTime() > Date.now();
+  if (!recordUsable) {
+    const provider = await msg91.verifySentOtp(mobile, otp);
+    if (provider === 'valid') {
+      await otpRepository.deleteOtp(mobile);
+      return finishVerified(mobile);
+    }
     return {
       status: 400,
-      body: { success: false, code: 'OTP_EXPIRED', message: 'This code has expired. Request a new one.' },
-    };
-  }
-  if (new Date(record.expiresAt).getTime() <= Date.now()) {
-    await otpRepository.deleteOtp(mobile);
-    return {
-      status: 400,
-      body: { success: false, code: 'OTP_EXPIRED', message: 'This code has expired. Request a new one.' },
+      body: {
+        success: false,
+        code: 'OTP_EXPIRED',
+        message: 'This code has expired. Request a new one.',
+        resendAfterSeconds: 0,
+      },
     };
   }
   if ((record.attempts || 0) >= MAX_VERIFY_ATTEMPTS) {
@@ -176,6 +184,10 @@ async function verifyOtp(mobile, rawOtp) {
   }
 
   await otpRepository.deleteOtp(mobile);
+  return finishVerified(mobile);
+}
+
+async function finishVerified(mobile) {
   const { pub } = await loadRecords(mobile);
   if (pub.eligibility === ELIGIBILITY.FORM_INCOMPLETE) {
     return {

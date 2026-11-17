@@ -858,8 +858,39 @@ async function getMsg91Diagnostics(phoneFilter) {
   return results;
 }
 
+/**
+ * Ask MSG91 whether this SMS code is still valid.
+ * Used when the local OTP record was lost or already marked expired.
+ * @returns {Promise<'valid'|'expired'|'invalid'|'unavailable'>}
+ */
+async function verifySentOtp(phone, otp) {
+  if (isTestRuntime()) return 'unavailable';
+  const { authkey } = resolveMsg91Config();
+  const mobile = normalizeIndianMobile(phone);
+  if (!authkey || !mobile || !/^\d{6}$/.test(String(otp || ''))) return 'unavailable';
+  try {
+    const response = await axios.get(`${MSG91_SEND_OTP_URL}/verify`, {
+      params: { mobile, otp: String(otp) },
+      headers: { authkey, accept: 'application/json' },
+      timeout: 10000,
+      validateStatus: () => true,
+    });
+    const body = response.data && typeof response.data === 'object' ? response.data : {};
+    const type = String(body.type || '').toLowerCase();
+    const message = String(body.message || '').toLowerCase();
+    if (response.status < 400 && type === 'success') return 'valid';
+    if (message.includes('expire')) return 'expired';
+    if (response.status >= 400 || type === 'error') return 'invalid';
+    return 'unavailable';
+  } catch (error) {
+    console.error('[MSG91] OTP verify failed', error && error.message ? error.message : error);
+    return 'unavailable';
+  }
+}
+
 module.exports = {
   sendOtp,
+  verifySentOtp,
   sendOtpDirect,
   sendOtpViaFlow,
   getMsg91Diagnostics,
