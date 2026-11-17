@@ -41,12 +41,14 @@ async function canSend(phone) {
     return { allowed: false, retryAfter: waitSec, message: 'Please wait before requesting another OTP.' };
   }
 
-  // Resend cooldown: latest OTP for this phone must be older than 60s
+  // Resend cooldown: latest OTP for this phone must be older than 60s.
+  // An already-expired code must not keep the student waiting.
   const latest = await OtpVerification.findOne({ phoneNumber: p })
     .sort({ createdAt: -1 })
     .lean()
     .exec();
-  if (latest && latest.createdAt && new Date(latest.createdAt) > cooldownCutoff) {
+  const latestStillValid = latest && latest.expiresAt && new Date(latest.expiresAt).getTime() > now.getTime();
+  if (latestStillValid && latest.createdAt && new Date(latest.createdAt) > cooldownCutoff) {
     const waitSec = Math.ceil((new Date(latest.createdAt).getTime() + RESEND_COOLDOWN_MS - now.getTime()) / 1000);
     return { allowed: false, retryAfter: waitSec, message: 'Please wait before requesting another OTP.' };
   }
