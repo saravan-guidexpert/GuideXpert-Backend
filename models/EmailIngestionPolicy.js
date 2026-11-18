@@ -20,12 +20,36 @@ const emailIngestionPolicySchema = new mongoose.Schema(
     },
     enabled: {
       type: Boolean,
-      default: true
+      default: false
     },
     description: {
       type: String,
       trim: true,
       default: null
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
+      default: null
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
+      default: null
+    },
+    activationApprovedAt: {
+      type: Date,
+      default: null
+    },
+    activationApprovedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
+      default: null
+    },
+    activationTimeZone: {
+      type: String,
+      trim: true,
+      default: 'Asia/Kolkata'
     }
   },
   {

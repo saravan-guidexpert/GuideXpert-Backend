@@ -15,6 +15,9 @@ const SupportTicketEvent = require('../../models/SupportTicketEvent');
 const GraphSubscription = require('../../models/GraphSubscription');
 const EmailIngestionPolicy = require('../../models/EmailIngestionPolicy');
 const { APPROVED_MAILBOX, mailboxScopeStatus } = require('./mailboxScopeService');
+const { isBulkProcessingEnabled } = require('./processingConfig');
+const { validDate } = require('./ingestionSafety');
+const { ACTIVATION_TIME_ZONE, formatActivationLocal } = require('./activationTime');
 const EmailSyncCursor = require('../../models/EmailSyncCursor');
 const { BUCKET_NAME } = require('./attachmentStorage');
 const { enqueueJob } = require('./queueService');
@@ -658,7 +661,7 @@ async function retryJob(id, admin) {
   return { id: String(updated._id), state: updated.state, stage: updated.stage };
 }
 
-const SCOPE_BLOCKER_TEXT = 'MAILBOX_SCOPE_UNVERIFIED: Exchange Online application RBAC for the approved mailbox is not recorded. A Microsoft 365 administrator must scope the app to support@niatindia.com and confirm it before any message is retrieved.';
+const SCOPE_BLOCKER_TEXT = 'MAILBOX_SCOPE_UNVERIFIED: Exchange Online application RBAC for support@niatindia.com is not recorded. This restricts which mailbox the application can read. It does not change Outlook delivery, forwarding, or user permissions. A Microsoft 365 administrator must configure and verify that restriction before any message is retrieved.';
 
 function healthItem(key, label, verified, detail, extra = {}) {
   return { key, label, verified, detail, ...extra };
@@ -690,15 +693,29 @@ async function buildHealthItems(data, lastGraphCheck) {
   }
 
   const policy = data.policies.find((row) => row.mailbox === APPROVED_MAILBOX);
+  const activation = validDate(policy && policy.activationAt);
+  const activationLabel = activation ? `${formatActivationLocal(activation)} (${ACTIVATION_TIME_ZONE}), stored as ${activation.toISOString()}` : '';
   if (!policy) {
-    items.push(healthItem('mailbox_policy', 'Mailbox policy', false, 'No ingestion policy exists for the approved mailbox.'));
-  } else if (policy.enabled !== true) {
-    items.push(healthItem('mailbox_policy', 'Mailbox policy', false, 'The ingestion policy for the approved mailbox is disabled.'));
+    items.push(healthItem('mailbox_policy', 'Mailbox policy', false, 'Missing policy. A Super Admin must create an ingestion policy for support@niatindia.com and approve an activation time.'));
   } else if (!policy.activationAt) {
-    items.push(healthItem('mailbox_policy', 'Mailbox policy', false, 'The policy has no activation date.'));
+    items.push(healthItem('mailbox_policy', 'Mailbox policy', false, `Policy status: ${policy.enabled ? 'enabled' : 'disabled'}. Missing activation timestamp. Choose a time and approve it. Mail received before that time is rejected.`));
+  } else if (!activation) {
+    items.push(healthItem('mailbox_policy', 'Mailbox policy', false, `Policy status: ${policy.enabled ? 'enabled' : 'disabled'}. Invalid activation timestamp. Enter a real date and time and approve it.`));
+  } else if (policy.enabled !== true) {
+    items.push(healthItem('mailbox_policy', 'Mailbox policy', false, `Policy status: disabled. Activation ${activationLabel}. Ingestion stays blocked until a Super Admin enables this policy.`, { activationAt: policy.activationAt }));
   } else {
-    items.push(healthItem('mailbox_policy', 'Mailbox policy', true, 'Policy is enabled with an activation date.', { activationAt: policy.activationAt }));
+    items.push(healthItem('mailbox_policy', 'Mailbox policy', true, `Policy status: enabled. Activation ${activationLabel}.`, { activationAt: policy.activationAt }));
   }
+
+  const bulkOn = isBulkProcessingEnabled();
+  items.push(healthItem(
+    'bulk_processing',
+    'Bulk processing',
+    bulkOn ? false : true,
+    bulkOn
+      ? 'Global processing is enabled because SUPPORT_EMAIL_PROCESSING_ENABLED is 1. Set it to 0 so the normal worker stays off. The single-email test does not start that worker.'
+      : 'Global processing is disabled. SUPPORT_EMAIL_PROCESSING_ENABLED is not 1, so the normal worker does not run.'
+  ));
 
   const scope = mailboxScopeStatus();
   items.push(healthItem(
@@ -771,7 +788,7 @@ async function health() {
     lastGraphCheck
   ] = await Promise.all([
     EmailSyncCursor.find().select('mailbox folder syncStatus lastSuccessfulSyncAt baselineCompletedAt activationAt deltaLink error').sort({ lastSuccessfulSyncAt: -1 }).limit(10).lean(),
-    EmailIngestionPolicy.find().select('mailbox enabled activationAt baselineCompletedAt').sort({ mailbox: 1 }).lean(),
+    EmailIngestionPolicy.find().select('mailbox enabled activationAt activationApprovedAt activationApprovedBy baselineCompletedAt').sort({ mailbox: 1 }).lean(),
     SupportEmailWebhookEvent.find().select('status changeType lifecycleEventType receivedAt errorCategory').sort({ receivedAt: -1 }).limit(1).lean(),
     GraphSubscription.find().select('mailbox folder status expirationDateTime subscriptionId').sort({ expirationDateTime: -1 }).limit(10).lean(),
     SupportEmailProcessingJob.aggregate([{ $group: { _id: '$state', count: { $sum: 1 } } }]),
@@ -787,6 +804,9 @@ async function health() {
     SupportEmailAuditLog.findOne({ action: 'graph_auth_diagnostic' }).select('metadata createdAt').sort({ createdAt: -1 }).lean()
   ]);
   const latestSync = cursor.find((row) => row.lastSuccessfulSyncAt) || null;
+  const approverIds = policies.map((row) => row.activationApprovedBy).filter(Boolean);
+  const approvers = approverIds.length ? await Admin.find({ _id: { $in: approverIds } }).select('name username').lean() : [];
+  const approverNames = new Map(approvers.map((row) => [String(row._id), row.name || row.username]));
   const result = {
     sync: {
       lastSuccessfulAt: latestSync ? latestSync.lastSuccessfulSyncAt : null,
@@ -804,14 +824,26 @@ async function health() {
     ingestion: {
       approvedMailbox: APPROVED_MAILBOX,
       mailboxScope: mailboxScopeStatus().status,
-      processingEnabled: process.env.SUPPORT_EMAIL_PROCESSING_ENABLED === '1',
-      policies: policies.map((row) => ({
-        mailbox: row.mailbox,
-        enabled: row.enabled === true,
-        activationAt: row.activationAt,
-        baselineCompletedAt: row.baselineCompletedAt,
-        approved: row.mailbox === APPROVED_MAILBOX
-      }))
+      processingEnabled: isBulkProcessingEnabled(),
+      processingFlag: String(process.env.SUPPORT_EMAIL_PROCESSING_ENABLED == null ? '' : process.env.SUPPORT_EMAIL_PROCESSING_ENABLED).trim(),
+      policies: policies.map((row) => {
+        const activation = validDate(row.activationAt);
+        return {
+          mailbox: row.mailbox,
+          enabled: row.enabled === true,
+          status: row.enabled === true ? 'enabled' : 'disabled',
+          activationAt: activation,
+          activationTimeZone: ACTIVATION_TIME_ZONE,
+          activationLocal: activation ? formatActivationLocal(activation) : '',
+          activationApprovedAt: row.activationApprovedAt || null,
+          configuredBy: row.activationApprovedBy ? {
+            id: String(row.activationApprovedBy),
+            name: approverNames.get(String(row.activationApprovedBy)) || 'admin'
+          } : null,
+          baselineCompletedAt: row.baselineCompletedAt,
+          approved: row.mailbox === APPROVED_MAILBOX
+        };
+      })
     },
     webhook: webhook[0] ? {
       status: webhook[0].status,

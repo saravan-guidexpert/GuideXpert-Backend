@@ -459,3 +459,54 @@ test('ticket detail shows the single-email test in processing history and audit 
   assert.equal(detail.data.ticket.recipients.to[0].email, APPROVED_MAILBOX);
   assert.equal(detail.data.ticket.internetMessageId.includes('one-test@example.com'), true);
 });
+
+test('single-email mode runs while bulk processing is disabled', async () => {
+  await allowScope();
+  process.env.SUPPORT_EMAIL_PROCESSING_ENABLED = '0';
+  try {
+    const report = await readiness({ authService: authOk() });
+    assert.equal(report.processingEnabled, false);
+    assert.equal(report.blockers.includes('bulk_processing_enabled'), false);
+    assert.equal(report.blockers.includes('global_processing_enabled'), false);
+    assert.equal(report.checks.find((row) => row.key === 'bulk_processing').verified, true);
+    const result = await runSingleEmailTest({
+      graphMessageId: MESSAGE_ID,
+      graphClient: graphOk(),
+      authService: authOk(),
+      chatCompletion: async () => ({ content: classificationJson(), model: 'test-model' })
+    });
+    assert.equal(result.promptVersion, 'v1.3');
+    assert.equal(result.ticket.category, 'feedback');
+    assert.equal((await runProcessingBatch()).enabled, false);
+    assert.equal(await SupportEmailProcessingJob.countDocuments(), 0);
+    assert.equal(await GoogleSheetsSyncJob.countDocuments(), 0);
+  } finally {
+    delete process.env.SUPPORT_EMAIL_PROCESSING_ENABLED;
+  }
+});
+
+test('bulk processing set to 1 does not block or start the single-email test', async () => {
+  await allowScope();
+  process.env.SUPPORT_EMAIL_PROCESSING_ENABLED = '1';
+  try {
+    const report = await readiness({ authService: authOk() });
+    assert.equal(report.processingEnabled, true);
+    assert.equal(report.blockers.includes('policy_missing'), false);
+    assert.equal(report.checks.find((row) => row.key === 'bulk_processing').verified, false);
+    const result = await runSingleEmailTest({
+      graphMessageId: MESSAGE_ID,
+      admin: await Admin.findOne({ username: 'super-single' }),
+      graphClient: graphOk(),
+      authService: authOk(),
+      chatCompletion: async () => ({ content: classificationJson(), model: 'test-model' })
+    });
+    assert.ok(result.ticket.id);
+    assert.equal(await SupportEmailProcessingJob.countDocuments(), 0);
+    assert.equal(await GoogleSheetsSyncJob.countDocuments(), 0);
+    const batch = await runProcessingBatch();
+    assert.equal(batch.enabled, true);
+    assert.equal(batch.processed, 0);
+  } finally {
+    delete process.env.SUPPORT_EMAIL_PROCESSING_ENABLED;
+  }
+});

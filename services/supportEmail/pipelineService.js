@@ -82,7 +82,7 @@ async function runStage(job, deps) {
 async function runProcessingBatch(options = {}) {
   const config = getProcessingConfig(options);
   if (!config.enabled) {
-    return { enabled: false, processed: 0, reason: 'SUPPORT_EMAIL_PROCESSING_ENABLED is not 1' };
+    return { enabled: false, processed: 0, reason: 'SUPPORT_EMAIL_PROCESSING_ENABLED is not exactly 1, so the bulk worker stays off' };
   }
 
   const now = options.now || new Date();

@@ -17,7 +17,8 @@ const { ingestEmailMessage } = require('./emailIngestionService');
 const { processAttachments } = require('./attachmentService');
 const { classifyEmail } = require('./classificationService');
 const { createTicketForEmail } = require('./ticketService');
-const { getProcessingConfig } = require('./processingConfig');
+const { getProcessingConfig, isBulkProcessingEnabled } = require('./processingConfig');
+const { validDate } = require('./ingestionSafety');
 const { PROMPT_VERSION } = require('./prompts/emailClassification.v1');
 const { STAGES } = require('../../constants/supportEmail');
 const SupportTicket = require('../../models/SupportTicket');
@@ -100,19 +101,65 @@ async function storedMailboxReport() {
   };
 }
 
+function readinessChecks({ policy, scope, graph, processingEnabled }) {
+  const checks = [];
+  if (!policy) {
+    checks.push({ key: 'policy', verified: false, blocking: true, code: 'policy_missing', detail: 'Missing policy. Create an ingestion policy for support@niatindia.com before any message is read.' });
+  } else if (policy.enabled !== true) {
+    checks.push({ key: 'policy', verified: false, blocking: true, code: 'policy_disabled', detail: 'Disabled policy. Enable the ingestion policy before the single-email test can run.' });
+  } else if (String(policy.mailbox || '').trim().toLowerCase() !== APPROVED_MAILBOX) {
+    checks.push({ key: 'policy', verified: false, blocking: true, code: 'wrong_mailbox', detail: 'The stored policy is not for support@niatindia.com.' });
+  } else {
+    checks.push({ key: 'policy', verified: true, blocking: true, code: null, detail: 'An enabled ingestion policy exists for support@niatindia.com.' });
+  }
+
+  const activation = validDate(policy && policy.activationAt);
+  if (!policy || policy.activationAt == null || policy.activationAt === '') {
+    checks.push({ key: 'activation', verified: false, blocking: true, code: 'activation_missing', detail: 'Missing activation timestamp. Choose a time and approve it. Mail received before that time is rejected.' });
+  } else if (!activation) {
+    checks.push({ key: 'activation', verified: false, blocking: true, code: 'activation_invalid', detail: 'Invalid activation timestamp. Enter a real date and time and approve it.' });
+  } else {
+    checks.push({ key: 'activation', verified: true, blocking: true, code: null, detail: `Activation time is ${activation.toISOString()}. Earlier messages are rejected.` });
+  }
+
+  checks.push({
+    key: 'exchange_scope',
+    verified: scope.status === 'VERIFIED',
+    blocking: true,
+    code: scope.status === 'VERIFIED' ? null : 'MAILBOX_SCOPE_UNVERIFIED',
+    detail: scope.status === 'VERIFIED'
+      ? 'Exchange mailbox scope is recorded for support@niatindia.com.'
+      : 'Missing Exchange scope verification. Application access is limited to support@niatindia.com and does not change Outlook delivery, forwarding, or user permissions. A Microsoft 365 administrator must configure and verify that restriction, then set SUPPORT_EMAIL_EXCHANGE_SCOPE_VERIFIED=1 and SUPPORT_EMAIL_EXCHANGE_SCOPE_MAILBOX=support@niatindia.com.'
+  });
+  checks.push({
+    key: 'graph_auth',
+    verified: graph.ok === true,
+    blocking: true,
+    code: graph.ok === true ? null : 'graph_token_failed',
+    detail: graph.ok === true
+      ? 'Graph authentication succeeded. No mailbox message was read.'
+      : 'Graph authentication failed. Fix the app credentials, then run the token test again.'
+  });
+  checks.push({
+    key: 'bulk_processing',
+    verified: processingEnabled ? false : true,
+    blocking: false,
+    code: processingEnabled ? 'bulk_processing_enabled' : null,
+    detail: processingEnabled
+      ? 'Global processing is enabled because SUPPORT_EMAIL_PROCESSING_ENABLED is 1. Set it to 0 so the normal worker stays off. The single-email test does not start that worker.'
+      : 'Global processing is disabled. The normal worker does not run.'
+  });
+  return checks;
+}
+
 async function readiness(deps = {}) {
-  const scope = mailboxScopeStatus(deps.env || process.env);
+  const env = deps.env || process.env;
+  const scope = mailboxScopeStatus(env);
   const graph = await checkGraphAuthentication(deps.authService);
   const stored = await storedMailboxReport();
-  const processingEnabled = process.env.SUPPORT_EMAIL_PROCESSING_ENABLED === '1';
-  const blockers = [];
-  if (scope.status !== 'VERIFIED') blockers.push('MAILBOX_SCOPE_UNVERIFIED');
-  if (!graph.ok) blockers.push('graph_token_failed');
-  if (!stored.policy) blockers.push('policy_missing');
-  else if (!stored.policy.enabled) blockers.push('policy_disabled');
-  else if (stored.policy.mailbox !== APPROVED_MAILBOX) blockers.push('wrong_mailbox');
-  else if (!(stored.policy.activationAt instanceof Date) && !stored.policy.activationAt) blockers.push('activation_missing');
-  if (processingEnabled) blockers.push('global_processing_enabled');
+  const processingEnabled = isBulkProcessingEnabled(env);
+  const checks = readinessChecks({ policy: stored.policy, scope, graph, processingEnabled });
+  const blockers = checks.filter((check) => check.blocking && check.verified !== true && check.code).map((check) => check.code);
   return {
     testMode: TEST_MODE,
     approvedMailbox: APPROVED_MAILBOX,
@@ -121,6 +168,7 @@ async function readiness(deps = {}) {
     graphToken: { ok: graph.ok, code: graph.code, expiresInMs: graph.expiresInMs || 0 },
     processingEnabled,
     ...stored,
+    checks,
     blockers
   };
 }
