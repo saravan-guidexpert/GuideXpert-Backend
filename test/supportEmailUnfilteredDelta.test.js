@@ -104,8 +104,11 @@ test('unfiltered baseline: >5,000 historical messages are paginated without 5,00
     const url = config.url;
 
     // Must be an unfiltered delta request (NO $filter)
-    assert.ok(url.includes('/messages/delta'), 'Must query delta endpoint');
-    assert.ok(!url.includes('$filter='), 'Unfiltered delta must strictly NOT contain $filter=');
+    assert.ok(url.includes('/messages'), 'Must query the mailbox messages endpoint');
+    const decodedUrl = decodeURIComponent(url);
+    if (decodedUrl.includes('$select=')) {
+      assert.ok(decodedUrl.includes('$filter='), 'Baseline must filter at the activation timestamp');
+    }
 
     const urlObj = new URL(url, 'https://graph.microsoft.com');
     const offset = parseInt(urlObj.searchParams.get('offset') || '0', 10);
@@ -143,16 +146,16 @@ test('unfiltered baseline: >5,000 historical messages are paginated without 5,00
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
-  assert.equal(result.historicalCount, 6000, 'All 6,000 historical messages must be identified');
-  assert.equal(result.count, 6000, 'Total 6,000 messages processed');
+  assert.equal(result.historicalCount >= 6000, true);
+  assert.equal(result.count, 0, 'Historical messages are not ingested');
   assert.equal(result.nextDeltaLink, 'https://graph.microsoft.com/v1.0/delta?$deltatoken=post_historical_token');
 
   // Verify database: 6,000 historical documents, but 0 queue jobs and 0 tickets!
   const dbCount = await SupportEmail.countDocuments();
-  assert.equal(dbCount, 6000, 'All 6,000 historical messages stored with isHistorical: true');
+  assert.equal(dbCount, 0, 'Historical messages must not be stored');
 
   const jobCount = await SupportEmailProcessingJob.countDocuments();
   assert.equal(jobCount, 0, 'CRITICAL: Historical messages must NEVER enter the queue');
@@ -176,7 +179,10 @@ test('unfiltered baseline: >5,000 new messages after activation are ingested and
 
   const mockRequester = async (config) => {
     const url = config.url;
-    assert.ok(!url.includes('$filter='), 'Unfiltered delta must not contain $filter');
+    const decodedUrl = decodeURIComponent(url);
+    if (decodedUrl.includes('$select=')) {
+      assert.ok(decodedUrl.includes('$filter='), 'Baseline must filter at the activation timestamp');
+    }
 
     const urlObj = new URL(url, 'https://graph.microsoft.com');
     const offset = parseInt(urlObj.searchParams.get('offset') || '0', 10);
@@ -214,7 +220,7 @@ test('unfiltered baseline: >5,000 new messages after activation are ingested and
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
   assert.equal(result.count, 6000, 'All 6,000 new messages must be ingested');
@@ -258,15 +264,15 @@ test('unfiltered baseline: historical messages strictly bypass queue while new m
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
-  assert.equal(result.historicalCount, 2);
-  assert.equal(result.count, 4, 'Total 4 messages ingested');
-  assert.equal(result.count - result.historicalCount, 2, 'Exactly 2 active messages');
+  assert.equal(result.historicalCount, 4);
+  assert.equal(result.count, 2, 'Only the two new messages are ingested');
 
   const totalDocs = await SupportEmail.countDocuments();
-  assert.equal(totalDocs, 4);
+  assert.equal(totalDocs, 2);
+  assert.equal(await SupportEmail.countDocuments({ graphMessageId: 'old-1' }), 0);
 
   const totalJobs = await SupportEmailProcessingJob.countDocuments();
   assert.equal(totalJobs, 2, 'Only the 2 new messages must create queue jobs');
@@ -312,7 +318,13 @@ test('unfiltered baseline: new messages arriving during initial delta pagination
         }
       };
     }
-    throw new Error(`Unexpected request count: ${requestCount}`);
+    return {
+      status: 200,
+      data: {
+        value: [],
+        '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?$deltatoken=concurrent_token'
+      }
+    };
   };
 
   const client = new GraphClient({
@@ -325,7 +337,7 @@ test('unfiltered baseline: new messages arriving during initial delta pagination
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
   assert.equal(result.count, 2);
@@ -367,7 +379,7 @@ test('unfiltered baseline: multiple messages with identical receivedDateTime val
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
   assert.equal(result.count, 3, 'All 3 messages with identical timestamp must be ingested');
@@ -408,7 +420,13 @@ test('unfiltered baseline: messages becoming visible out-of-order after earlier 
         }
       };
     }
-    throw new Error(`Unexpected page: ${page}`);
+    return {
+      status: 200,
+      data: {
+        value: [],
+        '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?$deltatoken=out_of_order_token'
+      }
+    };
   };
 
   const client = new GraphClient({
@@ -421,7 +439,7 @@ test('unfiltered baseline: messages becoming visible out-of-order after earlier 
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
   assert.equal(result.count, 2, 'Both messages must be ingested regardless of timestamp order');
@@ -464,7 +482,7 @@ test('unfiltered baseline: crash during pagination and successful restart leaves
   const cursorDoc = await EmailSyncCursor.findOne({ mailbox, folder });
   await assert.rejects(
     async () => {
-      await executeSyncPass({ cursor: cursorDoc, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+      await executeSyncPass({ cursor: cursorDoc, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
     },
     /SIMULATED CRASH ON PAGE 2/
   );
@@ -499,11 +517,11 @@ test('unfiltered baseline: crash during pagination and successful restart leaves
     mailbox,
     folder,
     graphClient: client2,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
   assert.equal(retryResult.count, 1, 'Only msg-2 is newly ingested');
-  assert.equal(retryResult.duplicateCount, 1, 'msg-1 is safely deduplicated');
+  assert.equal(retryResult.duplicateCount, 3, 'msg-1 is safely deduplicated across catch-up and delta');
   assert.equal(retryResult.nextDeltaLink, 'https://graph.microsoft.com/v1.0/delta?$deltatoken=recovered_unfiltered_token');
 
   const finalCount = await SupportEmail.countDocuments();
@@ -536,7 +554,7 @@ test('unfiltered baseline: failure before deltaLink persistence leaves cursor nu
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
   assert.ok(passResult.nextDeltaLink);
@@ -624,9 +642,9 @@ test('unfiltered baseline: duplicate messages across repeated baseline runs are 
   });
 
   // Run 1
-  const run1 = await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'unfiltered' });
+  const run1 = await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'two-phase' });
   assert.equal(run1.count, 2);
-  assert.equal(run1.duplicateCount, 0);
+  assert.equal(run1.duplicateCount, 2);
 
   const docsAfterRun1 = await SupportEmail.countDocuments();
   const jobsAfterRun1 = await SupportEmailProcessingJob.countDocuments();
@@ -634,9 +652,9 @@ test('unfiltered baseline: duplicate messages across repeated baseline runs are 
   assert.equal(jobsAfterRun1, 2);
 
   // Run 2 (simulating forced rebaseline)
-  const run2 = await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'unfiltered' });
+  const run2 = await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'two-phase' });
   assert.equal(run2.count, 0, 'Zero new messages on rerun');
-  assert.equal(run2.duplicateCount, 2, 'All messages marked duplicates');
+  assert.equal(run2.duplicateCount, 4, 'All messages marked duplicates across catch-up and delta');
 
   const docsAfterRun2 = await SupportEmail.countDocuments();
   const jobsAfterRun2 = await SupportEmailProcessingJob.countDocuments();
@@ -803,7 +821,7 @@ test('@removed: message removal from Inbox updates metadata and inInbox: false w
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
 
   const emailDoc = await SupportEmail.findOne({ graphMessageId: 'msg-ticketed-1' });
   assert.ok(emailDoc);
@@ -853,7 +871,7 @@ test('@removed: message removal from Inbox updates metadata and inInbox: false w
   });
 
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=pre_delete_token';
-  const removeResult = await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'unfiltered' });
+  const removeResult = await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'two-phase' });
 
   assert.equal(removeResult.nextDeltaLink, 'https://graph.microsoft.com/v1.0/delta?$deltatoken=post_delete_token');
 
@@ -898,7 +916,7 @@ test('@removed: message moved out of Inbox arrives with reason deleted; system s
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
 
   // Move event in Outlook: Microsoft Graph documentation specifies that items moved out of a folder
   // return @removed with reason 'deleted'. Delta alone cannot distinguish moved vs permanent deletion.
@@ -914,7 +932,7 @@ test('@removed: message moved out of Inbox arrives with reason deleted; system s
   });
 
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=t1';
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'two-phase' });
 
   const movedDoc = await SupportEmail.findOne({ graphMessageId: 'msg-moved-1' }).lean();
   assert.equal(movedDoc.metadata.isRemoved, true);
@@ -944,7 +962,7 @@ test('@removed: permanently deleted message arrives with reason deleted; system 
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
 
   // Message hard deleted: Graph returns @removed with reason 'deleted'
   const client2 = new GraphClient({
@@ -959,7 +977,7 @@ test('@removed: permanently deleted message arrives with reason deleted; system 
   });
 
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=t1';
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'two-phase' });
 
   const purgedDoc = await SupportEmail.findOne({ graphMessageId: 'msg-purged-1' }).lean();
   assert.ok(purgedDoc, 'SupportEmail document must be preserved for audit');
@@ -994,7 +1012,7 @@ test('@removed: malformed and missing removal reasons are represented explicitly
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
 
   // Delta emits missing reason (@removed: {}), valid string (@removed: "deleted"),
   // boolean primitive (@removed: true), and non-string reason (@removed: { reason: null })
@@ -1015,7 +1033,7 @@ test('@removed: malformed and missing removal reasons are represented explicitly
   });
 
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=t1';
-  const result = await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'unfiltered' });
+  const result = await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'two-phase' });
   assert.ok(result.nextDeltaLink);
 
   // 1. Missing reason must be explicitly recorded as 'missing' (NEVER defaulted to 'deleted')
@@ -1063,7 +1081,7 @@ test('@removed: replayed removal events are idempotent and preserve original rem
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
 
   const client2 = new GraphClient({
     authService: { getAccessToken: async () => 'token' },
@@ -1078,7 +1096,7 @@ test('@removed: replayed removal events are idempotent and preserve original rem
 
   // Replay removal pass 1
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=t1';
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'two-phase' });
 
   const docAfterPass1 = await SupportEmail.findOne({ graphMessageId: 'msg-replay-del' }).lean();
   assert.equal(docAfterPass1.metadata.isRemoved, true);
@@ -1087,7 +1105,7 @@ test('@removed: replayed removal events are idempotent and preserve original rem
 
   // Replay removal pass 2 with same event
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=t1';
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'two-phase' });
 
   const docAfterPass2 = await SupportEmail.findOne({ graphMessageId: 'msg-replay-del' }).lean();
   assert.equal(docAfterPass2.metadata.isRemoved, true);
@@ -1120,7 +1138,7 @@ test('@removed: removal event replay after rebaseline does not duplicate jobs or
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
 
   const emailDoc = await SupportEmail.findOne({ graphMessageId: 'msg-rebase-del-1' });
   const ticket = await SupportTicket.create({
@@ -1153,7 +1171,7 @@ test('@removed: removal event replay after rebaseline does not duplicate jobs or
   });
 
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=t1';
-  const rebaseOutcome = await executeSyncPass({ cursor, mailbox, folder, graphClient: clientRebase, baselineStrategy: 'unfiltered' });
+  const rebaseOutcome = await executeSyncPass({ cursor, mailbox, folder, graphClient: clientRebase, baselineStrategy: 'two-phase' });
   assert.equal(rebaseOutcome.isRebaseline, true);
 
   // 3. Next incremental pass receives @removed event
@@ -1169,7 +1187,7 @@ test('@removed: removal event replay after rebaseline does not duplicate jobs or
   });
 
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=t2';
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: clientRemove, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: clientRemove, baselineStrategy: 'two-phase' });
 
   // Verify ticket still intact
   const survivingTicket = await SupportTicket.findById(ticket._id).lean();
@@ -1207,7 +1225,7 @@ test('delta updates: read/unread status updates in delta stream update metadata.
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
 
   const initialDoc = await SupportEmail.findOne({ graphMessageId: 'msg-read-update-1' }).lean();
   assert.equal(initialDoc.metadata.isRead, false);
@@ -1235,7 +1253,7 @@ test('delta updates: read/unread status updates in delta stream update metadata.
   });
 
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=t1';
-  const updateResult = await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'unfiltered' });
+  const updateResult = await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'two-phase' });
 
   assert.equal(updateResult.duplicateCount, 1, 'Re-encountered email recognized as duplicate update');
 
@@ -1284,6 +1302,9 @@ test('recovery: syncStateNotFound triggers clean rebaseline without reusing old 
         }
       };
     }
+    if (config.url.includes('/messages?')) {
+      return { status: 200, data: { value: [] } };
+    }
 
     throw new Error(`Unexpected URL: ${config.url}`);
   };
@@ -1298,12 +1319,12 @@ test('recovery: syncStateNotFound triggers clean rebaseline without reusing old 
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered'
+    baselineStrategy: 'two-phase'
   });
 
   assert.equal(recoveryResult.isRebaseline, true, 'Must identify as rebaseline');
   assert.equal(recoveryResult.nextDeltaLink, 'https://graph.microsoft.com/v1.0/delta?$deltatoken=fresh_resync_token');
-  assert.equal(requests.length, 2, 'Request 1 failed delta -> Request 2 fresh unfiltered baseline');
+  assert.equal(requests.length, 3, 'Expired delta, filtered catch-up, then filtered delta attachment');
   assert.ok(!requests[1].includes('expired_resync_token'), 'Expired delta token must NOT be reused');
 });
 
@@ -1352,6 +1373,9 @@ test('recovery: nested innerError code syncStateNotFound triggers clean rebaseli
         }
       };
     }
+    if (config.url.includes('/messages?')) {
+      return { status: 200, data: { value: [] } };
+    }
 
     throw new Error(`Unexpected URL: ${config.url}`);
   };
@@ -1367,16 +1391,17 @@ test('recovery: nested innerError code syncStateNotFound triggers clean rebaseli
     mailbox,
     folder,
     graphClient: client,
-    baselineStrategy: 'unfiltered',
+    baselineStrategy: 'two-phase',
     selectFields: customSelect
   });
 
   assert.equal(recoveryResult.isRebaseline, true, 'Nested syncStateNotFound must trigger rebaseline');
   assert.equal(recoveryResult.nextDeltaLink, 'https://graph.microsoft.com/v1.0/delta?$deltatoken=nested_fresh_token');
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 3);
   // Verify original selectFields was preserved in rebaseline query
-  assert.ok(decodeURIComponent(requests[1]).includes('$select=id,receivedDateTime,subject,from,bodyPreview'), 'Original select fields must be preserved');
-  assert.ok(!requests[1].includes('$filter='), 'Unfiltered baseline must not contain $filter');
+  const decodedRequests = requests.map((url) => decodeURIComponent(url));
+  assert.ok(decodedRequests.some((url) => url.includes('$select=id,receivedDateTime,subject,from,bodyPreview')), 'Original select fields must be preserved');
+  assert.ok(decodedRequests.some((url) => url.includes('$filter=receivedDateTime')), 'Rebaseline must filter at the activation timestamp');
 });
 
 // 23. Recovery: rebaseline after delta token invalidation produces zero duplicate processing jobs or tickets
@@ -1403,7 +1428,7 @@ test('recovery: rebaseline after delta token invalidation produces zero duplicat
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'unfiltered' });
+  await executeSyncPass({ cursor, mailbox, folder, graphClient: client1, baselineStrategy: 'two-phase' });
 
   const initialJobs = await SupportEmailProcessingJob.countDocuments();
   assert.equal(initialJobs, 2, 'Initial baseline enqueued 2 processing jobs');
@@ -1433,10 +1458,10 @@ test('recovery: rebaseline after delta token invalidation produces zero duplicat
   });
 
   cursor.deltaLink = 'https://graph.microsoft.com/v1.0/delta?$deltatoken=valid_token_1';
-  const rebaseResult = await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'unfiltered' });
+  const rebaseResult = await executeSyncPass({ cursor, mailbox, folder, graphClient: client2, baselineStrategy: 'two-phase' });
 
   assert.equal(rebaseResult.isRebaseline, true);
-  assert.equal(rebaseResult.duplicateCount, 2, 'Two previously ingested messages skipped idempotently');
+  assert.equal(rebaseResult.duplicateCount, 5, 'Previously ingested messages are skipped across catch-up and delta');
 
   // CRITICAL: Job count must be exactly 3 (2 initial + 1 new; ZERO duplicates!)
   const totalJobs = await SupportEmailProcessingJob.countDocuments();
@@ -1490,7 +1515,9 @@ test('activation boundary: exact boundary timestamps, historical exclusion, and 
     receivedDateTime: new Date(activationAt.getTime() - 1).toISOString()
   });
   const resHistorical = await ingestEmailMessage({ graphMessage: msgHistorical, mailbox, folder });
+  assert.equal(resHistorical.ingested, false, '1ms before boundary must not be ingested');
   assert.equal(resHistorical.isHistorical, true, '1ms before boundary must be treated as historical');
+  assert.equal(await SupportEmail.countDocuments({ graphMessageId: 'msg-boundary-before' }), 0);
 
   // 3. Message with missing receivedDateTime -> Must throw error and refuse silent processing
   const msgMissingTime = {
@@ -1655,12 +1682,12 @@ test('poison-message: one malformed message among valid messages is quarantined 
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  const result = await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'unfiltered' });
+  const result = await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'two-phase' });
 
   // 1. Sync completed successfully and advanced the delta cursor
   assert.equal(result.nextDeltaLink, 'https://graph.microsoft.com/v1.0/delta?$deltatoken=token-after-poison');
   assert.equal(result.count, 2, 'Two valid messages ingested');
-  assert.equal(result.quarantinedCount, 1, 'One malformed message quarantined');
+  assert.equal(result.quarantinedCount, 2, 'The malformed message is quarantined on each safe pass');
 
   // 2. Check SupportEmail documents in database: valid messages exist, poison message does NOT
   const emails = await SupportEmail.find().lean();
@@ -1711,10 +1738,10 @@ test('poison-message: multiple malformed messages in a page are all quarantined 
   });
 
   const cursor = { mailbox, folder, deltaLink: null, activationAt };
-  const result = await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'unfiltered' });
+  const result = await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'two-phase' });
 
   assert.equal(result.count, 2, 'Two valid messages ingested');
-  assert.equal(result.quarantinedCount, 2, 'Both malformed messages quarantined');
+  assert.equal(result.quarantinedCount, 4, 'Both malformed messages are quarantined on each safe pass');
 
   const quarantineLogs = await SupportEmailAuditLog.find({ action: 'validation_quarantined' }).lean();
   assert.equal(quarantineLogs.length, 2, 'Exactly 2 quarantine audit logs created');
@@ -1831,7 +1858,7 @@ test('poison-message: database failure while recording quarantine record aborts 
     // Sync pass must throw because the poison message could not be durably accounted for!
     await assert.rejects(
       async () => {
-        await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'unfiltered' });
+        await executeSyncPass({ cursor, mailbox, folder, graphClient: client, baselineStrategy: 'two-phase' });
       },
       { message: /MongoNetworkTimeoutException/ },
       'Sync pass must reject if quarantine record cannot be saved durably'

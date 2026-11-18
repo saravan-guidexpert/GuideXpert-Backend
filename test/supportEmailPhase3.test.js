@@ -324,30 +324,32 @@ describe('support email phase 3', () => {
     assert.equal(tickets.length, 1);
   });
 
-  test('a sheets failure leaves the created ticket in place', async () => {
+  test('the pipeline never calls Google Sheets and a leftover sheets job completes quietly', async () => {
     const email = await seedEmail({ bodyText: 'Fee receipt question.', 'pipeline.fetch': 'fetched', 'pipeline.ai': 'classified' });
     await classifyEmail(email._id, {
       config: getProcessingConfig({ enabled: true }),
       chatCompletion: async () => ({ content: classificationJson(), model: 'test-model' })
     });
     const created = await createTicketForEmail(email._id);
+    assert.equal(created.enqueue, undefined);
     await enqueueJob({ emailId: email._id, stage: 'sheets', maxAttempts: 1 });
     const outcome = await runProcessingBatch({
       enabled: true,
       batchSize: 1,
       timeBudgetMs: 5000,
-      sheetId: 'sheet-1',
       sheetsClient: {
         async appendRow() {
-          throw Object.assign(new Error('sheets_down'), { code: 'sheets_write_failed' });
+          throw new Error('sheets must not be called');
         }
       }
     });
     const ticket = await SupportTicket.findById(created.ticketId);
     const updated = await SupportEmail.findById(email._id);
     assert.equal(Boolean(ticket), true);
-    assert.equal(updated.pipeline.sheets, 'exhausted');
-    assert.equal(outcome.deadLetter, 1);
+    assert.equal(updated.pipeline.sheets, 'not_used');
+    assert.equal(updated.pipeline.state, 'completed');
+    assert.equal(outcome.deadLetter, 0);
+    assert.equal(outcome.completed, 1);
   });
 
   test('sheet upsert updates the same row and omits student contact details', async () => {
@@ -356,7 +358,7 @@ describe('support email phase 3', () => {
       config: getProcessingConfig({ enabled: true }),
       chatCompletion: async () => ({ content: classificationJson(), model: 'test-model' })
     });
-    await createTicketForEmail(email._id);
+    await createTicketForEmail(email._id, { sheetsState: 'pending' });
     const calls = [];
     const sheetsClient = {
       async appendRow({ values }) {

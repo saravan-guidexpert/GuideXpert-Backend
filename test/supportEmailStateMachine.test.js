@@ -55,6 +55,19 @@ describe('supportEmail stateMachine', () => {
     assert.equal(isValidPipelineTransition(STAGES.TICKET, 'failed', 'created'), true);
   });
 
+  test('a not-used sheets state completes the email and is never reported as a failure', () => {
+    assert.equal(isValidPipelineTransition(STAGES.SHEETS, 'pending', 'not_used'), true);
+    assert.equal(isValidPipelineTransition(STAGES.SHEETS, 'not_used', 'synced'), false);
+    assert.equal(
+      deriveOverallPipelineState({ fetch: 'fetched', attachments: 'extracted', ai: 'classified', ticket: 'created', sheets: 'not_used' }, true),
+      'completed'
+    );
+    assert.equal(
+      deriveOverallPipelineState({ fetch: 'fetched', attachments: 'extracted', ai: 'classified', ticket: 'created', sheets: 'pending' }, true),
+      'processing'
+    );
+  });
+
   test('invalid pipeline stage transitions are rejected and assert throws', () => {
     assert.equal(isValidPipelineTransition(STAGES.FETCH, 'fetched', 'pending'), false);
     assert.equal(isValidPipelineTransition(STAGES.SHEETS, 'synced', 'pending'), false);

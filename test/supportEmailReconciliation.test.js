@@ -21,6 +21,17 @@ const {
   RECONCILIATION_INTERVAL_MS
 } = require('../services/supportEmail/reconciliationService');
 const { SubscriptionService } = require('../services/supportEmail/subscriptionService');
+const { APPROVED_MAILBOX } = require('../services/supportEmail/mailboxScopeService');
+
+function allowApprovedScope() {
+  process.env.SUPPORT_EMAIL_EXCHANGE_SCOPE_VERIFIED = '1';
+  process.env.SUPPORT_EMAIL_EXCHANGE_SCOPE_MAILBOX = APPROVED_MAILBOX;
+}
+
+function clearApprovedScope() {
+  delete process.env.SUPPORT_EMAIL_EXCHANGE_SCOPE_VERIFIED;
+  delete process.env.SUPPORT_EMAIL_EXCHANGE_SCOPE_MAILBOX;
+}
 
 class MockGraphClient {
   constructor() {
@@ -59,6 +70,7 @@ test.before(async () => {
 
 test.beforeEach(async () => {
   await clearTestDb();
+  clearApprovedScope();
   process.env.MS_GRAPH_CLIENT_STATE_SECRET = 'test-suite-default-hmac-secret-key-32b';
   process.env.MS_GRAPH_CLIENT_STATE_KEY_ID = 'primary';
 });
@@ -74,18 +86,32 @@ test.after(async () => {
 // ==========================================
 
 test('1. reconcileMailbox skips when policy is disabled or missing', async () => {
-  const mailbox = 'disabled@guidexpert.com';
-  // Policy exists but enabled = false
-  await EmailIngestionPolicy.create({ mailbox, enabled: false, activationAt: new Date() });
+  const blocked = new MockGraphClient();
+  const unverified = await reconcileMailbox({
+    mailbox: APPROVED_MAILBOX,
+    folder: 'inbox',
+    graphClient: blocked
+  });
+  assert.strictEqual(unverified.skipped, true);
+  assert.strictEqual(unverified.reason, 'MAILBOX_SCOPE_UNVERIFIED');
+  assert.strictEqual(blocked.requests.length, 0);
 
-  const result = await reconcileMailbox({ mailbox, folder: 'inbox' });
-
+  allowApprovedScope();
+  await EmailIngestionPolicy.create({ mailbox: APPROVED_MAILBOX, enabled: false, activationAt: new Date() });
+  const disabledGraph = new MockGraphClient();
+  const result = await reconcileMailbox({
+    mailbox: APPROVED_MAILBOX,
+    folder: 'inbox',
+    graphClient: disabledGraph
+  });
   assert.strictEqual(result.skipped, true);
-  assert.strictEqual(result.reason, 'policy_disabled_or_missing');
+  assert.strictEqual(result.reason, 'policy_disabled');
+  assert.strictEqual(disabledGraph.requests.length, 0);
 });
 
 test('2. reconcileMailbox repairs missing subscription via health check', async () => {
-  const mailbox = 'support@guidexpert.com';
+  const mailbox = 'support@niatindia.com';
+  allowApprovedScope();
   await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
 
   const mockGraph = new MockGraphClient();
@@ -110,7 +136,8 @@ test('2. reconcileMailbox repairs missing subscription via health check', async 
 });
 
 test('3. reconcileMailbox skips sync if cursor is fresh and no pending sync', async () => {
-  const mailbox = 'support@guidexpert.com';
+  const mailbox = 'support@niatindia.com';
+  allowApprovedScope();
   await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
 
   // Cursor was synced 2 minutes ago (well within 15m interval)
@@ -150,7 +177,8 @@ test('3. reconcileMailbox skips sync if cursor is fresh and no pending sync', as
 });
 
 test('4. reconcileMailbox recovers missed webhook when hasPendingSync is true', async () => {
-  const mailbox = 'support@guidexpert.com';
+  const mailbox = 'support@niatindia.com';
+  allowApprovedScope();
   await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
 
   // Cursor has pending sync signaled by missed webhook
@@ -197,7 +225,8 @@ test('4. reconcileMailbox recovers missed webhook when hasPendingSync is true', 
 });
 
 test('5. reconcileMailbox recovers crashed worker with expired lease', async () => {
-  const mailbox = 'support@guidexpert.com';
+  const mailbox = 'support@niatindia.com';
+  allowApprovedScope();
   await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
 
   // Cursor stuck in 'syncing' with expired lease 5 minutes ago
@@ -242,7 +271,8 @@ test('5. reconcileMailbox recovers crashed worker with expired lease', async () 
 });
 
 test('6. reconcileMailbox recovers periodic stale interval (>15m)', async () => {
-  const mailbox = 'support@guidexpert.com';
+  const mailbox = 'support@niatindia.com';
+  allowApprovedScope();
   await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
 
   // Last sync was 20 minutes ago (> 15m default threshold)
@@ -281,7 +311,8 @@ test('6. reconcileMailbox recovers periodic stale interval (>15m)', async () => 
 });
 
 test('7. reconcileMailbox marks pending SupportEmailWebhookEvent records as processed', async () => {
-  const mailbox = 'support@guidexpert.com';
+  const mailbox = 'support@niatindia.com';
+  allowApprovedScope();
   await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
 
   // Seed webhook event in 'received' state
@@ -333,7 +364,8 @@ test('8. runAllReconciliations processes all enabled policies and skips disabled
 
   assert.strictEqual(summary.totalPolicies, 2);
   assert.strictEqual(summary.processedCount, 2);
-  assert.strictEqual(summary.results.length, 2);
+  assert.ok(summary.results.every((row) => row.skipped === true));
+  assert.strictEqual(mockGraph.requests.length, 0);
 });
 
 test('9. runAllReconciliations terminates early when batchBudgetMs is exhausted', async () => {
@@ -357,16 +389,14 @@ test('9. runAllReconciliations terminates early when batchBudgetMs is exhausted'
 });
 
 test('10. runAllReconciliations isolates errors in individual mailboxes', async () => {
-  await EmailIngestionPolicy.create({ mailbox: 'failing@guidexpert.com', enabled: true, activationAt: new Date() });
+  allowApprovedScope();
+  await EmailIngestionPolicy.create({ mailbox: APPROVED_MAILBOX, enabled: true, activationAt: new Date() });
   await EmailIngestionPolicy.create({ mailbox: 'healthy@guidexpert.com', enabled: true, activationAt: new Date() });
 
   const mockGraph = new MockGraphClient();
-  // Fail specifically on failing mailbox
   const subSvc = {
     async syncSubscriptionHealth({ mailbox }) {
-      if (mailbox === 'failing@guidexpert.com') {
-        throw new Error('Graph connectivity timeout');
-      }
+      if (mailbox === APPROVED_MAILBOX) throw new Error('Graph connectivity timeout');
       return { healthy: true };
     }
   };
@@ -378,8 +408,13 @@ test('10. runAllReconciliations isolates errors in individual mailboxes', async 
   });
 
   assert.strictEqual(summary.processedCount, 2);
-  assert.strictEqual(summary.results[1].mailbox, 'healthy@guidexpert.com');
-  assert.strictEqual(summary.results[1].synced, true);
+  const approved = summary.results.find((row) => row.mailbox === APPROVED_MAILBOX);
+  const skipped = summary.results.find((row) => row.mailbox === 'healthy@guidexpert.com');
+  assert.strictEqual(approved.synced, true);
+  assert.strictEqual(approved.subscription.error, 'Graph connectivity timeout');
+  assert.strictEqual(skipped.skipped, true);
+  assert.strictEqual(skipped.reason, 'wrong_mailbox');
+  assert.ok(mockGraph.requests.length > 0);
 });
 
 // ==========================================
@@ -467,7 +502,8 @@ test('12. cron route accepts authorized request with valid CRON_SECRET and retur
 
 
 test('13. reconcileMailbox invokes remote orphan reconciliation during scheduled pass and cleans remote orphans', async () => {
-  const mailbox = 'orphan-recon@guidexpert.com';
+  const mailbox = APPROVED_MAILBOX;
+  allowApprovedScope();
   const folder = 'inbox';
   await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date() });
 

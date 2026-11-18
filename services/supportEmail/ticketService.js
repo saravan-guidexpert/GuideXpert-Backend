@@ -8,10 +8,11 @@ const { buildTicketDedupeKey } = require('./dedupeService');
 const { generateTicketNumber } = require('./ticketNumberService');
 const { loadEmail, setPipelineStage, codedError } = require('./bodyProcessingService');
 const { emptyClassification } = require('./classificationSchema');
-const { STAGES } = require('../../constants/supportEmail');
+const { STAGES, normalizeTicketCategory, isKnownTicketCategory } = require('../../constants/supportEmail');
 
 function ticketStatus(classification) {
-  return classification && classification.needsHumanReview ? 'needs_review' : 'open';
+  if (!classification) return 'needs_review';
+  return classification.needsHumanReview || !isKnownTicketCategory(classification.category) ? 'needs_review' : 'open';
 }
 
 function ticketFields(email, classification, aiRunId, attachmentIds) {
@@ -34,7 +35,7 @@ function ticketFields(email, classification, aiRunId, attachmentIds) {
       summary: classification.summary || '',
       details: ''
     },
-    category: classification.category || 'other',
+    category: normalizeTicketCategory(classification.category),
     subCategory: classification.subcategory || '',
     priority: classification.priority || 'medium',
     sentiment: classification.sentiment || 'neutral',
@@ -42,7 +43,7 @@ function ticketFields(email, classification, aiRunId, attachmentIds) {
     status: ticketStatus(classification),
     taxonomyVersion: '1.0',
     aiRunId: aiRunId || null,
-    tags: classification.needsHumanReview ? ['manual_review'] : [],
+    tags: ticketStatus(classification) === 'needs_review' ? ['manual_review'] : [],
     metadata: {
       intent: classification.intent || '',
       urgency: classification.urgency || '',
@@ -63,11 +64,20 @@ async function latestClassification(email) {
  * Creates or links a ticket from the source email. Duplicate workers converge
  * on the unique dedupe key. This function never sends a reply.
  */
-async function createTicketForEmail(emailId) {
+async function markSheetsDisconnected(email, sheetsState) {
+  if (sheetsState === 'pending') return;
+  if ((email.pipeline && email.pipeline.sheets) === 'pending') {
+    await setPipelineStage(email, STAGES.SHEETS, sheetsState);
+  }
+}
+
+async function createTicketForEmail(emailId, options = {}) {
+  const sheetsState = options.sheetsState || 'not_used';
   const email = await loadEmail(emailId);
   if (['created', 'linked', 'merged'].includes(email.pipeline.ticket)) {
     const existing = await SupportTicket.findOne({ emailIds: email._id }).lean();
-    return { enqueue: STAGES.SHEETS, outcome: email.pipeline.ticket, ticketId: existing && existing._id };
+    await markSheetsDisconnected(email, sheetsState);
+    return { outcome: email.pipeline.ticket, ticketId: existing && existing._id };
   }
 
   const { classification, aiRunId } = await latestClassification(email);
@@ -124,7 +134,8 @@ async function createTicketForEmail(emailId) {
   }
 
   await setPipelineStage(email, STAGES.TICKET, outcome === 'created' ? 'created' : 'linked');
-  return { enqueue: STAGES.SHEETS, outcome, ticketId: ticket._id };
+  await markSheetsDisconnected(email, sheetsState);
+  return { outcome, ticketId: ticket._id };
 }
 
 module.exports = {

@@ -68,8 +68,10 @@ const PIPELINE_TRANSITIONS = Object.freeze({
     failed: Object.freeze(['pending', 'processing', 'created', 'linked', 'merged']) // retry path
   }),
   [STAGES.SHEETS]: Object.freeze({
-    pending: Object.freeze(['synced', 'failed', 'exhausted']),
+    pending: Object.freeze(['synced', 'failed', 'exhausted', 'skipped_test_mode', 'not_used']),
     synced: Object.freeze([]),
+    not_used: Object.freeze([]),
+    skipped_test_mode: Object.freeze([]),
     failed: Object.freeze(['pending', 'processing', 'synced', 'exhausted']), // retry path to synced
     exhausted: Object.freeze(['pending', 'processing', 'synced']) // admin retry path
   })
@@ -153,7 +155,7 @@ function deriveOverallPipelineState(pipeline = {}, hasAttachments = false) {
   const attachmentsDone = !hasAttachments || ['extracted', 'partial'].includes(attachments);
   const aiDone = ai === 'classified';
   const ticketDone = ['created', 'linked', 'merged'].includes(ticket);
-  const sheetsDone = sheets === 'synced';
+  const sheetsDone = ['synced', 'skipped_test_mode', 'not_used'].includes(sheets);
 
   if (fetchDone && attachmentsDone && aiDone && ticketDone && sheetsDone) {
     return 'completed';

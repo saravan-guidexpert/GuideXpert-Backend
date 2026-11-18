@@ -8,7 +8,6 @@ const { processEmailBody } = require('./bodyProcessingService');
 const { processAttachments } = require('./attachmentService');
 const { classifyEmail } = require('./classificationService');
 const { createTicketForEmail } = require('./ticketService');
-const { syncTicketSheet } = require('./sheetsSyncService');
 const { loadEmail, setPipelineStage } = require('./bodyProcessingService');
 const { recordMetricEvent, summarizeError } = require('./observability');
 const { STAGES, JOB_STATES } = require('../../constants/supportEmail');
@@ -72,7 +71,7 @@ async function runStage(job, deps) {
   if (job.stage === STAGES.ATTACHMENTS) return processAttachments(job.emailId, deps);
   if (job.stage === STAGES.AI) return classifyEmail(job.emailId, deps);
   if (job.stage === STAGES.TICKET) return createTicketForEmail(job.emailId);
-  if (job.stage === STAGES.SHEETS) return syncTicketSheet(job.emailId, deps);
+  // Google Sheets is disconnected from the active pipeline. A leftover sheets job completes without any external call.
   return { done: true };
 }
 
@@ -103,8 +102,7 @@ async function runProcessingBatch(options = {}) {
   const deps = {
     config,
     graphClient: options.graphClient,
-    chatCompletion: options.chatCompletion,
-    sheetsClient: options.sheetsClient
+    chatCompletion: options.chatCompletion
   };
   const deadline = now.getTime() + config.timeBudgetMs;
 
@@ -140,12 +138,6 @@ async function runProcessingBatch(options = {}) {
           if (job.stage === STAGES.AI || job.stage === STAGES.FETCH) {
             await openManualReview(job.emailId);
             stats.needsReview += 1;
-          }
-          if (job.stage === STAGES.SHEETS) {
-            const email = await loadEmail(job.emailId);
-            if (email.pipeline.sheets !== 'synced' && email.pipeline.sheets !== 'exhausted') {
-              await setPipelineStage(email, STAGES.SHEETS, 'exhausted');
-            }
           }
         } else {
           stats.retried += 1;

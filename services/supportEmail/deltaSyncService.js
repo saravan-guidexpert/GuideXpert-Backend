@@ -2,6 +2,7 @@
 
 const { GraphClient, GraphDeltaTokenExpiredError } = require('./graphClient');
 const { getMailboxActivationAt, ingestMessageBatch } = require('./emailIngestionService');
+const { safetyError, validDate } = require('./ingestionSafety');
 const SupportEmail = require('../../models/SupportEmail');
 
 const DEFAULT_GRAPH_SELECT = [
@@ -49,15 +50,16 @@ function buildCatchUpUrl({
     $top: String(top)
   });
 
-  if (activationAt instanceof Date && !isNaN(activationAt.getTime())) {
-    params.set('$filter', `receivedDateTime ge ${activationAt.toISOString()}`);
-  }
+  const activation = validDate(activationAt);
+  if (!activation) throw safetyError('activation_missing');
+  params.set('$filter', `receivedDateTime ge ${activation.toISOString()}`);
 
   return `${path}?${params.toString()}`;
 }
 
 /**
  * Constructs the Microsoft Graph delta query URL.
+ * An unfiltered delta URL is rejected because it would read historical mail.
  */
 function buildInitialDeltaUrl({
   mailbox,
@@ -73,9 +75,9 @@ function buildInitialDeltaUrl({
     $select: selectFields
   });
 
-  if (activationAt instanceof Date && !isNaN(activationAt.getTime())) {
-    params.set('$filter', `receivedDateTime ge ${activationAt.toISOString()}`);
-  }
+  const activation = validDate(activationAt);
+  if (!activation) throw safetyError('activation_missing');
+  params.set('$filter', `receivedDateTime ge ${activation.toISOString()}`);
 
   return `${path}?${params.toString()}`;
 }
@@ -316,6 +318,7 @@ async function executeTwoPhaseBaseline({
   let catchUpTotalCount = 0;
   let catchUpHistoricalCount = 0;
   let catchUpDuplicateCount = 0;
+  let catchUpQuarantinedCount = 0;
   let catchUpPages = 0;
   let maxReceivedDateTime = null;
 
@@ -347,6 +350,7 @@ async function executeTwoPhaseBaseline({
     catchUpTotalCount += passResult.count;
     catchUpHistoricalCount += passResult.historicalCount;
     catchUpDuplicateCount += passResult.duplicateCount;
+    catchUpQuarantinedCount += passResult.quarantinedCount || 0;
     catchUpPages += passResult.pages;
 
     if (passResult.maxReceivedDateTime) {
@@ -393,6 +397,7 @@ async function executeTwoPhaseBaseline({
     count: catchUpTotalCount + deltaResult.count,
     historicalCount: catchUpHistoricalCount + deltaResult.historicalCount,
     duplicateCount: catchUpDuplicateCount + deltaResult.duplicateCount,
+    quarantinedCount: catchUpQuarantinedCount + (deltaResult.quarantinedCount || 0),
     pages: catchUpPages + deltaResult.pages,
     catchUpCount: catchUpTotalCount,
     deltaCount: deltaResult.count,
@@ -401,61 +406,11 @@ async function executeTwoPhaseBaseline({
 }
 
 /**
- * Executes an Unfiltered Initial Delta Baseline:
- * Queries /messages/delta WITHOUT any $filter parameter.
- * Follows all @odata.nextLink pages until the final @odata.deltaLink is returned.
- * Enforces the activation boundary locally in emailIngestionService:
- * - Messages with receivedDateTime >= activationAt are ingested into active pipeline.
- * - Messages with receivedDateTime < activationAt are marked isHistorical: true and bypass the queue.
- * - The 5,000-message filter limitation does NOT apply because NO $filter parameter is used.
- * - Returns the final official @odata.deltaLink for subsequent incremental synchronization.
- *
- * @param {Object} params
- * @param {GraphClient} params.graphClient
- * @param {string} params.mailbox
- * @param {string} [params.folder='inbox']
- * @param {Date} params.activationAt
- * @param {Object} [params.queueSvc]
- * @param {string} [params.selectFields=DEFAULT_GRAPH_SELECT]
- * @returns {Promise<{ nextDeltaLink: string, count: number, historicalCount: number, duplicateCount: number, pages: number, isUnfilteredBaseline: boolean }>}
+ * Unfiltered delta baselines read every historical message. They are refused
+ * before any Microsoft Graph request.
  */
-async function executeUnfilteredDeltaBaseline({
-  graphClient,
-  mailbox,
-  folder = 'inbox',
-  activationAt,
-  queueSvc,
-  selectFields = DEFAULT_GRAPH_SELECT
-}) {
-  const normMailbox = mailbox.trim().toLowerCase();
-  const normFolder = folder.trim().toLowerCase();
-
-  // Initial delta URL with strictly NO $filter parameter
-  const initialDeltaUrl = buildInitialDeltaUrl({
-    mailbox: normMailbox,
-    folder: normFolder,
-    activationAt: null, // UNFILTERED: strictly no $filter
-    selectFields
-  });
-
-  const deltaResult = await paginateDeltaQuery({
-    graphClient,
-    initialUrl: initialDeltaUrl,
-    mailbox: normMailbox,
-    folder: normFolder,
-    activationAt,
-    queueSvc
-  });
-
-  return {
-    nextDeltaLink: deltaResult.nextDeltaLink,
-    count: deltaResult.count,
-    historicalCount: deltaResult.historicalCount,
-    duplicateCount: deltaResult.duplicateCount,
-    quarantinedCount: deltaResult.quarantinedCount || 0,
-    pages: deltaResult.pages,
-    isUnfilteredBaseline: true
-  };
+async function executeUnfilteredDeltaBaseline() {
+  throw safetyError('unsafe_unfiltered_baseline');
 }
 
 /**
@@ -510,36 +465,27 @@ async function executeSyncPass({
   const normMailbox = mailbox.trim().toLowerCase();
   const normFolder = folder.trim().toLowerCase();
 
-  // 1. Resolve activation boundary
+  // 1. Resolve activation boundary. Missing activation fails closed; never default to now.
   const policyActivationAt = await getMailboxActivationAt(normMailbox);
-  const effectiveActivationAt = cursor.activationAt || policyActivationAt || new Date();
+  const effectiveActivationAt = validDate(cursor.activationAt) || validDate(policyActivationAt);
+  if (!effectiveActivationAt) throw safetyError('activation_missing');
 
-  // Resolve baseline strategy: explicit option > cursor config > default 'two-phase'
-  const strategy = baselineStrategy || cursor.baselineStrategy || 'two-phase';
+  const strategy = baselineStrategy === 'unfiltered' || cursor.baselineStrategy === 'unfiltered'
+    ? 'unfiltered'
+    : 'two-phase';
+  if (strategy === 'unfiltered') throw safetyError('unsafe_unfiltered_baseline');
 
   // 2. Initial Baseline vs Incremental Sync
   if (!cursor.deltaLink) {
-    let baselineResult;
-    if (strategy === 'unfiltered') {
-      baselineResult = await executeUnfilteredDeltaBaseline({
-        graphClient,
-        mailbox: normMailbox,
-        folder: normFolder,
-        activationAt: effectiveActivationAt,
-        selectFields,
-        queueSvc
-      });
-    } else {
-      baselineResult = await executeTwoPhaseBaseline({
-        graphClient,
-        mailbox: normMailbox,
-        folder: normFolder,
-        activationAt: effectiveActivationAt,
-        selectFields,
-        handoffOverlapMs: rebaselineOverlapMs,
-        queueSvc
-      });
-    }
+    const baselineResult = await executeTwoPhaseBaseline({
+      graphClient,
+      mailbox: normMailbox,
+      folder: normFolder,
+      activationAt: effectiveActivationAt,
+      selectFields,
+      handoffOverlapMs: rebaselineOverlapMs,
+      queueSvc
+    });
 
     return {
       ...baselineResult,
@@ -570,32 +516,20 @@ async function executeSyncPass({
       const rebaselineFromMs = Math.max(activationTime, lastSync - rebaselineOverlapMs);
       const rebaselineFrom = new Date(rebaselineFromMs);
 
-      let recoveryResult;
-      if (strategy === 'unfiltered') {
-        recoveryResult = await executeUnfilteredDeltaBaseline({
-          graphClient,
-          mailbox: normMailbox,
-          folder: normFolder,
-          activationAt: effectiveActivationAt,
-          selectFields,
-          queueSvc
-        });
-      } else {
-        recoveryResult = await executeTwoPhaseBaseline({
-          graphClient,
-          mailbox: normMailbox,
-          folder: normFolder,
-          activationAt: rebaselineFrom,
-          selectFields,
-          handoffOverlapMs: rebaselineOverlapMs,
-          queueSvc
-        });
-      }
+      const recoveryResult = await executeTwoPhaseBaseline({
+        graphClient,
+        mailbox: normMailbox,
+        folder: normFolder,
+        activationAt: rebaselineFrom,
+        selectFields,
+        handoffOverlapMs: rebaselineOverlapMs,
+        queueSvc
+      });
 
       return {
         ...recoveryResult,
         isRebaseline: true,
-        rebaselineFrom: strategy === 'unfiltered' ? effectiveActivationAt : rebaselineFrom
+        rebaselineFrom
       };
     }
 

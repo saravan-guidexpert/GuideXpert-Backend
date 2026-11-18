@@ -4,6 +4,8 @@ const express = require('express');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 const { recoverManualSubscription } = require('../controllers/supportEmailRecoveryController');
 const dashboard = require('../services/supportEmail/adminDashboardService');
+const singleEmailTest = require('../services/supportEmail/singleEmailTestService');
+const { checkGraphAuthentication } = require('../services/supportEmail/graphHealthService');
 
 function requireSupportEmailAccess(req, res, next) {
   const admin = req.admin;
@@ -82,6 +84,42 @@ function createSupportEmailAdminRouter({ getSubscriptionService } = {}) {
       return res.json({ success: true, health: await dashboard.health() });
     } catch (error) {
       return sendError(res, error);
+    }
+  });
+
+  router.get('/graph-authentication', requireSuperAdmin, async (req, res) => {
+    const graph = await checkGraphAuthentication();
+    try {
+      await dashboard.recordGraphDiagnostic(req.admin, graph);
+    } catch (error) {
+      // Recording the result is best effort; the diagnostic itself still succeeded or failed.
+    }
+    return res.json({ success: true, graph });
+  });
+
+  router.get('/single-email-test/readiness', requireSuperAdmin, async (req, res) => {
+    try {
+      return res.json({ success: true, readiness: await singleEmailTest.readiness() });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/single-email-test', requireSuperAdmin, async (req, res) => {
+    try {
+      const result = await singleEmailTest.runSingleEmailTest({
+        graphMessageId: req.body && req.body.graphMessageId,
+        admin: req.admin
+      });
+      return res.json({ success: true, result });
+    } catch (error) {
+      const status = error && error.status ? error.status : 500;
+      return res.status(status).json({
+        success: false,
+        message: error && error.code ? error.code : 'request_failed',
+        readiness: error && error.readiness ? error.readiness : undefined,
+        ticketId: error && error.ticketId ? error.ticketId : undefined
+      });
     }
   });
 

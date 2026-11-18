@@ -34,7 +34,7 @@ const STAGE_STATES = Object.freeze({
   [STAGES.ATTACHMENTS]: Object.freeze(['pending', 'processing', 'extracted', 'partial', 'failed']),
   [STAGES.AI]: Object.freeze(['pending', 'processing', 'classified', 'needs_review', 'failed']),
   [STAGES.TICKET]: Object.freeze(['pending', 'linked', 'created', 'merged', 'failed']),
-  [STAGES.SHEETS]: Object.freeze(['pending', 'synced', 'failed', 'exhausted'])
+  [STAGES.SHEETS]: Object.freeze(['pending', 'synced', 'failed', 'exhausted', 'skipped_test_mode', 'not_used'])
 });
 
 const EMAIL_PIPELINE_STATES = Object.freeze([
@@ -73,6 +73,20 @@ const TICKET_CATEGORIES = Object.freeze([
   'general',
   'other'
 ]);
+
+/**
+ * One rule for a missing or unrecognised category everywhere (ticket creation, schema default,
+ * dashboard aggregation and display): fall back to 'other' and treat it as needing review.
+ */
+const DEFAULT_TICKET_CATEGORY = 'other';
+
+function normalizeTicketCategory(value) {
+  return TICKET_CATEGORIES.includes(value) ? value : DEFAULT_TICKET_CATEGORY;
+}
+
+function isKnownTicketCategory(value) {
+  return TICKET_CATEGORIES.includes(value);
+}
 
 const TICKET_PRIORITIES = Object.freeze([
   'low',
@@ -180,6 +194,9 @@ module.exports = {
   ATTACHMENT_SCAN_STATUS,
   ATTACHMENT_EXTRACT_STATUS,
   TICKET_CATEGORIES,
+  DEFAULT_TICKET_CATEGORY,
+  normalizeTicketCategory,
+  isKnownTicketCategory,
   TICKET_PRIORITIES,
   TICKET_STATUSES,
   TICKET_SENTIMENTS,

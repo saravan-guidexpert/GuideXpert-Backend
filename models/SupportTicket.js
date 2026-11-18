@@ -3,6 +3,7 @@
 const mongoose = require('mongoose');
 const {
   TICKET_CATEGORIES,
+  DEFAULT_TICKET_CATEGORY,
   TICKET_PRIORITIES,
   TICKET_STATUSES,
   TICKET_SENTIMENTS
@@ -75,7 +76,7 @@ const supportTicketSchema = new mongoose.Schema(
     category: {
       type: String,
       enum: TICKET_CATEGORIES,
-      default: 'general'
+      default: DEFAULT_TICKET_CATEGORY
     },
     subCategory: {
       type: String,

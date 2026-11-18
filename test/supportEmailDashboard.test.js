@@ -159,7 +159,7 @@ test('retry requeues only failed or dead-letter jobs and attachment download sta
   const { email, ticket } = await seedTicket();
   const dead = await SupportEmailProcessingJob.create({
     emailId: email._id,
-    stage: 'sheets',
+    stage: 'ai',
     state: 'dead_letter',
     attempts: 5,
     maxAttempts: 5,
@@ -205,6 +205,14 @@ test('retry requeues only failed or dead-letter jobs and attachment download sta
   assert.equal(file.buffer.includes(Buffer.from('%PDF-1.4')), true);
   const anonymous = await api(`/api/admin/support-email/attachments/${attachment._id}`, { auth: false });
   assert.equal(anonymous.status, 401);
+  const outsider = await Admin.create({ username: 'attachment-outsider', password: 'secret12', isSuperAdmin: false, sectionAccess: ['leads'] });
+  const deniedToken = jwt.sign({ adminId: outsider._id.toString() }, process.env.ADMIN_JWT_SECRET, { expiresIn: '1h' });
+  const forbidden = await api(`/api/admin/support-email/attachments/${attachment._id}`, {
+    headers: { authorization: `Bearer ${deniedToken}` }
+  });
+  assert.equal(forbidden.status, 403);
+  const graphDenied = await api('/api/admin/support-email/graph-authentication');
+  assert.equal(graphDenied.status, 403);
 });
 
 test('health reports operations without subscription secrets', async () => {
@@ -231,6 +239,11 @@ test('health reports operations without subscription secrets', async () => {
   assert.equal(health.data.health.webhook.status, 'processed');
   assert.equal(JSON.stringify(health.data).includes('super-secret-client-state'), false);
   assert.equal(JSON.stringify(health.data).includes('clientState'), false);
+  assert.equal(health.data.health.ingestion.approvedMailbox, 'support@niatindia.com');
+  assert.equal(health.data.health.ingestion.mailboxScope, 'MAILBOX_SCOPE_UNVERIFIED');
+  assert.equal(health.data.health.ingestion.processingEnabled, false);
+  assert.equal(health.data.health.subscriptions[0].status, 'active');
+  assert.equal(Object.hasOwn(health.data.health.subscriptions[0], 'subscriptionId'), false);
   const empty = await api('/api/admin/support-email/jobs');
   assert.equal(empty.status, 200);
   assert.deepEqual(empty.data.jobs, []);
