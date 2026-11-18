@@ -523,6 +523,7 @@ test('deltaSyncService: delta pagination follows @odata.nextLink across multiple
 test('deltaSyncService: final deltaLink is persisted safely in EmailSyncCursor on pass conclusion', async () => {
   const mailbox = 'support@guidexpert.com';
   const folder = 'inbox';
+  await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date('2026-11-01T00:00:00.000Z') });
 
   await signalMailboxSync({ mailbox, folder });
 
@@ -589,6 +590,7 @@ test('emailIngestionService: duplicate message ingestion is handled safely witho
 test('deltaSyncService: partial page failure aborts synchronization without advancing deltaLink', async () => {
   const mailbox = 'support@guidexpert.com';
   const folder = 'inbox';
+  await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date('2026-11-01T00:00:00.000Z') });
 
   const cursor = await EmailSyncCursor.create({
     mailbox,
@@ -642,6 +644,7 @@ test('deltaSyncService: partial page failure aborts synchronization without adva
 test('deltaSyncService: crash before cursor advancement leaves deltaLink checkpoint intact for replay', async () => {
   const mailbox = 'support@guidexpert.com';
   const folder = 'inbox';
+  await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date('2026-11-01T00:00:00.000Z') });
 
   await signalMailboxSync({ mailbox, folder });
   await EmailSyncCursor.findOneAndUpdate(
@@ -760,6 +763,7 @@ test('emailIngestionService: new-only activation boundary marks historical email
     receivedDateTime: '2026-11-13T09:59:59.000Z'
   });
   const res1 = await ingestEmailMessage({ graphMessage: histMsg, mailbox, folder });
+  assert.equal(res1.ingested, false);
   assert.equal(res1.isHistorical, true);
 
   // Email 2: received AT or AFTER activation (new)
@@ -772,8 +776,7 @@ test('emailIngestionService: new-only activation boundary marks historical email
 
   // Verify in MongoDB: only msg-new-1 has an enqueued processing job!
   const histEmail = await SupportEmail.findOne({ graphMessageId: 'msg-hist-1' }).lean();
-  assert.equal(histEmail.isHistorical, true);
-  assert.equal(histEmail.pipeline.state, 'completed');
+  assert.equal(histEmail, null);
 
   const newEmail = await SupportEmail.findOne({ graphMessageId: 'msg-new-1' }).lean();
   assert.equal(newEmail.isHistorical, false);
@@ -853,6 +856,7 @@ test('deltaSyncService: malformed Graph response missing value array throws desc
 test('deltaSyncService: concurrent sync requests coalesce seamlessly via mailboxSyncService', async () => {
   const mailbox = 'support@guidexpert.com';
   const folder = 'inbox';
+  await EmailIngestionPolicy.create({ mailbox, enabled: true, activationAt: new Date('2026-11-01T00:00:00.000Z') });
 
   await signalMailboxSync({ mailbox, folder });
 

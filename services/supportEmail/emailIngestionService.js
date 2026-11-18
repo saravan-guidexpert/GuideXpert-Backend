@@ -188,11 +188,21 @@ async function ingestEmailMessage({
     };
   }
 
-  // 2. Resolve activation boundary
+  // 2. Resolve activation boundary. Mail received before it is not stored or queued.
   const effectiveActivationAt = activationAt || (await getMailboxActivationAt(mailbox));
-  const isHistorical = effectiveActivationAt
-    ? normalized.receivedDateTime < effectiveActivationAt
+  const activationDate = effectiveActivationAt ? new Date(effectiveActivationAt) : null;
+  const isHistorical = activationDate && !Number.isNaN(activationDate.getTime())
+    ? normalized.receivedDateTime < activationDate
     : false;
+  if (isHistorical) {
+    return {
+      ingested: false,
+      isHistorical: true,
+      isDuplicate: false,
+      email: null,
+      skipped: 'historical_message'
+    };
+  }
 
   const docPayload = {
     ...normalized,
@@ -354,13 +364,12 @@ async function ingestMessageBatch({
     }
     if (outcome.isRemoved) {
       // Handled removal
+    } else if (outcome.isHistorical) {
+      historicalCount++;
     } else if (outcome.isDuplicate) {
       duplicateCount++;
-    } else {
+    } else if (outcome.ingested) {
       ingestedCount++;
-      if (outcome.isHistorical) {
-        historicalCount++;
-      }
     }
   }
 

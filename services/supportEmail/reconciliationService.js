@@ -8,6 +8,7 @@ const { runCoalescedSync, acquireSyncLock, signalMailboxSync } = require('./mail
 const { createSyncPassFn } = require('./deltaSyncService');
 const { GraphClient } = require('./graphClient');
 const { logOperationalEvent, incrementMetric, summarizeError } = require('./observability');
+const { assessIngestionSafety } = require('./ingestionSafety');
 
 const defaultSubscriptionService = new SubscriptionService();
 const RECONCILIATION_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes default delta catchup
@@ -52,23 +53,29 @@ async function reconcileMailbox({
     folder: normFolder
   });
 
-  // 1. Verify policy is enabled
-  const policy = await EmailIngestionPolicy.findOne({
+  // Fail closed before every Graph call: scope, exact mailbox, enabled policy, activation.
+  const policy = await EmailIngestionPolicy.findOne({ mailbox: normMailbox }).lean();
+  const safetyCursor = await EmailSyncCursor.findOne({
     mailbox: normMailbox,
-    enabled: true
-  }).lean();
-
-  if (!policy) {
+    folder: normFolder
+  }).select('baselineStrategy deltaLink').lean();
+  const safety = assessIngestionSafety({
+    mailbox: normMailbox,
+    policy,
+    cursor: safetyCursor
+  });
+  if (!safety.ok) {
     logOperationalEvent('info', 'support_email_reconciliation_skipped', {
       mailbox: normMailbox,
       folder: normFolder,
-      reason: 'policy_disabled_or_missing'
+      reason: safety.blockers[0]
     });
     return {
       mailbox: normMailbox,
       folder: normFolder,
       skipped: true,
-      reason: 'policy_disabled_or_missing'
+      reason: safety.blockers[0],
+      blockers: safety.blockers
     };
   }
 

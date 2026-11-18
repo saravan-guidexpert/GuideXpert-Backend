@@ -471,7 +471,7 @@ describe('support email phase 3 hardening', () => {
         model: 'test-model'
       })
     });
-    await createTicketForEmail(email._id);
+    await createTicketForEmail(email._id, { sheetsState: 'pending' });
     const ticket = await SupportTicket.findOne({ emailIds: email._id });
     const sheet = new Map();
     let appends = 0;
@@ -685,7 +685,7 @@ describe('support email phase 3 hardening', () => {
         model: 'test-model'
       })
     });
-    await createTicketForEmail(email._id);
+    await createTicketForEmail(email._id, { sheetsState: 'pending' });
     const ticket = await SupportTicket.findOne({ emailIds: email._id });
     const config = getProcessingConfig({ enabled: true, sheetId: 'sheet-1' });
     let appends = 0;
