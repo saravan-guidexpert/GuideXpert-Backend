@@ -16,7 +16,7 @@ function mailboxScopeStatus(env = process.env) {
   return {
     status: 'MAILBOX_SCOPE_UNVERIFIED',
     approvedMailbox: APPROVED_MAILBOX,
-    reason: 'Exchange Online application RBAC for the approved mailbox is not recorded'
+    reason: 'Exchange Online application RBAC for support@niatindia.com is not recorded. This restricts which mailbox the application can read. It does not change Outlook delivery, forwarding, or user permissions.'
   };
 }
 

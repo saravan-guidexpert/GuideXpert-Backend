@@ -29,13 +29,22 @@ function numberInRange(name, fallback, min, max) {
 }
 
 /**
+ * The bulk worker runs only when the variable is exactly "1" after trimming.
+ * "0", "false", "true", and an empty value all leave it disabled.
+ */
+function isBulkProcessingEnabled(env = process.env) {
+  return String(env && env.SUPPORT_EMAIL_PROCESSING_ENABLED != null ? env.SUPPORT_EMAIL_PROCESSING_ENABLED : '').trim() === '1';
+}
+
+/**
  * Phase 3 stays off until SUPPORT_EMAIL_PROCESSING_ENABLED=1.
  * The cron route checks this and does not register itself in vercel.json.
+ * An override enables a batch only when it is the boolean true, so the string "0" cannot turn the worker on.
  */
 function getProcessingConfig(overrides = {}) {
   const enabled = Object.prototype.hasOwnProperty.call(overrides, 'enabled')
-    ? Boolean(overrides.enabled)
-    : process.env.SUPPORT_EMAIL_PROCESSING_ENABLED === '1';
+    ? overrides.enabled === true
+    : isBulkProcessingEnabled();
   const maxDurationMs = overrideOrEnv(overrides, 'maxDurationMs', 'SUPPORT_EMAIL_MAX_DURATION_MS', DEFAULT_MAX_DURATION_MS);
   const lockMarginMs = overrideOrEnv(overrides, 'lockMarginMs', 'SUPPORT_EMAIL_LOCK_MARGIN_MS', DEFAULT_LOCK_MARGIN_MS);
   const requestedBudget = overrideOrEnv(overrides, 'timeBudgetMs', 'SUPPORT_EMAIL_TIME_BUDGET_MS', LIMITS.DEFAULT_TIME_BUDGET_MS);
@@ -107,5 +116,6 @@ function getProcessingConfig(overrides = {}) {
 }
 
 module.exports = {
-  getProcessingConfig
+  getProcessingConfig,
+  isBulkProcessingEnabled
 };

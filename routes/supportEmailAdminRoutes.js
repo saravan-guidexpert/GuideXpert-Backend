@@ -6,6 +6,7 @@ const { recoverManualSubscription } = require('../controllers/supportEmailRecove
 const dashboard = require('../services/supportEmail/adminDashboardService');
 const singleEmailTest = require('../services/supportEmail/singleEmailTestService');
 const { checkGraphAuthentication } = require('../services/supportEmail/graphHealthService');
+const ingestionPolicy = require('../services/supportEmail/ingestionPolicyService');
 
 function requireSupportEmailAccess(req, res, next) {
   const admin = req.admin;
@@ -95,6 +96,32 @@ function createSupportEmailAdminRouter({ getSubscriptionService } = {}) {
       // Recording the result is best effort; the diagnostic itself still succeeded or failed.
     }
     return res.json({ success: true, graph });
+  });
+
+  router.get('/ingestion-policy', requireSupportEmailAccess, async (req, res) => {
+    try {
+      return res.json({ success: true, policy: await ingestionPolicy.getPolicy() });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.post('/ingestion-policy', requireSuperAdmin, async (req, res) => {
+    try {
+      const policy = await ingestionPolicy.createPolicy(req.admin, req.body || {});
+      return res.status(201).json({ success: true, policy });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  router.patch('/ingestion-policy', requireSuperAdmin, async (req, res) => {
+    try {
+      const policy = await ingestionPolicy.updatePolicy(req.admin, req.body || {});
+      return res.json({ success: true, policy });
+    } catch (error) {
+      return sendError(res, error);
+    }
   });
 
   router.get('/single-email-test/readiness', requireSuperAdmin, async (req, res) => {
