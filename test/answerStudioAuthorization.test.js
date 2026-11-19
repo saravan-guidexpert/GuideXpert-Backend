@@ -95,7 +95,9 @@ describe('Answer Studio authorization', { timeout: 120000, concurrency: 1 }, () 
     const genericAt = source.indexOf("app.use('/api/admin', adminRoutes)");
     assert.ok(mountAt > -1);
     assert.ok(genericAt > mountAt);
-    assert.match(source, /requireAdminSection\(ANSWER_STUDIO_SECTION_KEY/);
+    assert.match(source, /requireAnswerStudioAccess/);
+    const gate = fs.readFileSync(path.join(__dirname, '../middleware/requireAnswerStudioAccess.js'), 'utf8');
+    assert.match(gate, /requireAdminSection\(\s*ANSWER_STUDIO_SECTION_KEY/);
   });
 
   test('unauthenticated requests receive 401', async () => {
@@ -147,7 +149,10 @@ describe('Answer Studio authorization', { timeout: 120000, concurrency: 1 }, () 
     for (const [method, urlPath] of paths) {
       const result = await request(method, urlPath, sectionToken);
       assert.equal(result.status, 403, `${method} ${urlPath}`);
-      assert.equal(result.data.message, 'Super admin access required');
+      const expected = urlPath.includes('/prompts')
+        ? 'Quora and Reddit system prompt access is required.'
+        : 'Super admin access required';
+      assert.equal(result.data.message, expected, `${method} ${urlPath}`);
     }
   });
 

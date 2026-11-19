@@ -48,6 +48,7 @@ const ADMIN_SECTION_KEYS = [
   'system-prompt',
   // Registered before the admin sidebar entry. Navigation is a later phase.
   'answer-studio',
+  'quora-reddit-system-prompt',
   'support-email',
   CRM_SECTION,
   CRM_MANAGER_SECTION,
