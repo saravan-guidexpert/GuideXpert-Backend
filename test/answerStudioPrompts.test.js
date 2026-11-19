@@ -11,9 +11,12 @@ const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 
 const requireAdmin = require('../middleware/requireAdmin');
-const requireAdminSection = require('../middleware/requireAdminSection');
+const requireAnswerStudioAccess = require('../middleware/requireAnswerStudioAccess');
 const answerStudioRoutes = require('../routes/answerStudioRoutes');
-const { ANSWER_STUDIO_SECTION_KEY } = require('../services/answerStudio/constants');
+const {
+  ANSWER_STUDIO_SECTION_KEY,
+  QUORA_REDDIT_PROMPT_SECTION_KEY,
+} = require('../services/answerStudio/constants');
 const { PROMPT_BODY_LIMIT } = require('../services/answerStudio/promptValidation');
 const { resolveStudioPrompt } = require('../services/answerStudio/promptResolver');
 const defaultPrompts = require('../services/answerStudio/defaultPrompts');
@@ -33,6 +36,7 @@ let baseUrl;
 let superAdmin;
 let superToken;
 let sectionToken;
+let promptToken;
 let otherToken;
 let llmCalls;
 const originalCompletion = llmClient.chatCompletion;
@@ -77,7 +81,7 @@ describe('Answer Studio prompt management', { timeout: 120000, concurrency: 1 },
     app.use(
       '/api/admin/answer-studio',
       requireAdmin,
-      requireAdminSection(ANSWER_STUDIO_SECTION_KEY, 'Answer Studio access is required.'),
+      requireAnswerStudioAccess,
       answerStudioRoutes
     );
     server = app.listen(0);
@@ -104,9 +108,17 @@ describe('Answer Studio prompt management', { timeout: 120000, concurrency: 1 },
       isSuperAdmin: false,
       sectionAccess: ['leads'],
     });
+    const promptAdmin = await Admin.create({
+      username: 'prompt-granted',
+      password: 'secret12',
+      name: 'Prompt Granted',
+      isSuperAdmin: false,
+      sectionAccess: [QUORA_REDDIT_PROMPT_SECTION_KEY],
+    });
     superToken = sign(superAdmin);
     sectionToken = sign(sectionAdmin);
     otherToken = sign(otherAdmin);
+    promptToken = sign(promptAdmin);
   });
 
   after(async () => {
@@ -199,7 +211,10 @@ function holdStateUpdates(count) {
       body: promptBody(),
     });
     assert.equal(section.status, 403);
-    assert.equal(section.data.message, 'Super admin access required');
+    assert.equal(section.data.message, 'Quora and Reddit system prompt access is required.');
+
+    const granted = await request('GET', '/api/admin/answer-studio/prompts', { token: promptToken });
+    assert.equal(granted.status, 200);
   });
 
   test('creates an inactive draft and ignores forged audit fields', async () => {

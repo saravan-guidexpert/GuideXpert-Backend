@@ -1,6 +1,15 @@
 'use strict';
 
+const { QUORA_REDDIT_PROMPT_SECTION_KEY } = require('../services/answerStudio/constants');
+
 const MANAGEMENT_SCOPES = new Set(['knowledge', 'examples', 'prompts']);
+
+function canManageQuoraRedditPrompts(admin) {
+  if (!admin) return false;
+  if (admin.isSuperAdmin === true) return true;
+  const access = Array.isArray(admin.sectionAccess) ? admin.sectionAccess : [];
+  return access.includes(QUORA_REDDIT_PROMPT_SECTION_KEY);
+}
 
 function getModuleStatus(req, res) {
   const isSuperAdmin = req.admin?.isSuperAdmin === true;
@@ -13,7 +22,7 @@ function getModuleStatus(req, res) {
       knowledge: isSuperAdmin,
       examples: isSuperAdmin,
       exampleApproval: isSuperAdmin,
-      prompts: isSuperAdmin,
+      prompts: canManageQuoraRedditPrompts(req.admin),
       generations: true,
     },
   });

@@ -79,7 +79,7 @@ const { requireCrmSession } = require('./middleware/requireCrmSession');
 const crmPortalGate = require('./middleware/crmPortalGate');
 const { CRM_SECTION_KEY } = require('./constants/crm');
 const { CRM_ACCESS_SECTION } = require('./constants/crmUsers');
-const { ANSWER_STUDIO_SECTION_KEY } = require('./services/answerStudio/constants');
+const requireAnswerStudioAccess = require('./middleware/requireAnswerStudioAccess');
 const answerStudioRoutes = require('./routes/answerStudioRoutes');
 const {
   getWhatsAppConfigStatus,
@@ -249,7 +249,7 @@ app.use(
 app.use(
   '/api/admin/answer-studio',
   requireAdmin,
-  requireAdminSection(ANSWER_STUDIO_SECTION_KEY, 'Answer Studio access is required.'),
+  requireAnswerStudioAccess,
   answerStudioRoutes
 );
 app.use('/api/admin', adminRoutes);

@@ -2,6 +2,8 @@
 
 const express = require('express');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
+const requireAdminSection = require('../middleware/requireAdminSection');
+const { QUORA_REDDIT_PROMPT_SECTION_KEY } = require('../services/answerStudio/constants');
 const {
   getModuleStatus,
   managementNotImplemented,
@@ -16,12 +18,10 @@ const router = express.Router();
 router.get('/status', getModuleStatus);
 router.post('/generate', generationController.generate);
 
-function superAdminManagement(scope) {
-  const gate = express.Router({ mergeParams: true });
-  gate.use(requireSuperAdmin);
-  gate.use(managementNotImplemented(scope));
-  return gate;
-}
+const requirePromptSection = requireAdminSection(
+  QUORA_REDDIT_PROMPT_SECTION_KEY,
+  'Quora and Reddit system prompt access is required.'
+);
 
 router.post('/knowledge', requireSuperAdmin, knowledgeController.create);
 router.get('/knowledge', requireSuperAdmin, knowledgeController.list);
@@ -38,12 +38,12 @@ router.post('/examples/:id/revoke-approval', requireSuperAdmin, exampleControlle
 router.post('/examples/:id/archive', requireSuperAdmin, exampleController.archive);
 router.post('/examples/:id/reactivate', requireSuperAdmin, exampleController.reactivate);
 
-router.get('/prompts', requireSuperAdmin, promptController.list);
-router.post('/prompts', requireSuperAdmin, promptController.create);
-router.post('/prompts/:id/versions', requireSuperAdmin, promptController.createVersion);
-router.post('/prompts/:id/activate', requireSuperAdmin, promptController.activate);
-router.post('/prompts/:id/deactivate', requireSuperAdmin, promptController.deactivate);
-router.get('/prompts/:id', requireSuperAdmin, promptController.getOne);
-router.use('/prompts', superAdminManagement('prompts'));
+router.get('/prompts', requirePromptSection, promptController.list);
+router.post('/prompts', requirePromptSection, promptController.create);
+router.post('/prompts/:id/versions', requirePromptSection, promptController.createVersion);
+router.post('/prompts/:id/activate', requirePromptSection, promptController.activate);
+router.post('/prompts/:id/deactivate', requirePromptSection, promptController.deactivate);
+router.get('/prompts/:id', requirePromptSection, promptController.getOne);
+router.use('/prompts', requirePromptSection, managementNotImplemented('prompts'));
 
 module.exports = router;
