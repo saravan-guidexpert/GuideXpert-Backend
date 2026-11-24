@@ -1,6 +1,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 process.env.OTP_SECRET = process.env.OTP_SECRET || 'test-otp-secret-for-resources';
 
@@ -47,4 +49,13 @@ test('student resource models and storage service load', () => {
   require('../models/StudentResourceDownload');
   require('../services/resourceStorageService');
   require('../controllers/studentResourceController');
+});
+
+test('resource download OTP uses the MSG91 sender', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '../controllers/studentResourceController.js'),
+    'utf8'
+  );
+  assert.match(source, /const \{ sendOtp: sendOtpSms \} = require\('\.\.\/utils\/msg91Service'\)/);
+  assert.match(source, /gw = await sendOtpSms\(p, otp\)/);
 });

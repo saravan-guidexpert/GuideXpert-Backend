@@ -9,6 +9,7 @@ const {
   deleteFromGridFS,
 } = require('../services/resourceStorageService');
 const { generateOTP, hashOTP, verifyOTP } = require('../utils/otpUtil');
+const { sendOtp: sendOtpSms } = require('../utils/msg91Service');
 const otpRepository = require('../utils/otpRepository');
 const otpStore = require('../utils/otpStore');
 const { isPrivilegedPhone, getPrivilegedOtp, shouldSkipSmsForPrivileged } = require('../utils/privilegedAccess');
